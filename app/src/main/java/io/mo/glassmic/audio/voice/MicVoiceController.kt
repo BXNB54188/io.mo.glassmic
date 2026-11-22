@@ -98,6 +98,7 @@ class MicVoiceController @Inject constructor(
         var CAPTURE_SOURCE = -1
         var srcIndex = 0
         var silentMs = 0L
+        var locked = false      // 一旦某个源采到过真实声音，就锁定它不再轮换
         try {
             while (running) {
                 if (record == null) {
@@ -146,8 +147,16 @@ class MicVoiceController @Inject constructor(
                 // 静音看门狗：某些 ROM 对 UNPROCESSED 等源会"初始化成功但只返回零"，
                 // 初始化失败的回退逻辑抓不到这种情况，这里用实际电平判断并轮换采集源。
                 val blockMs = (n / 2).toLong() * 1000L / SAMPLE_RATE
-                if (peak <= 2) silentMs += blockMs else silentMs = 0
-                if (silentMs >= 1500L) {
+                if (peak > 500) {
+                    if (!locked) {
+                        locked = true
+                        GlassLog.b("MicVoice") { "采集源 ${CANDIDATE_SOURCES[srcIndex]} 有效，锁定不再轮换" }
+                    }
+                    silentMs = 0
+                } else if (peak <= 2) {
+                    silentMs += blockMs
+                }
+                if (!locked && silentMs >= 1500L) {
                     silentMs = 0
                     srcIndex = (srcIndex + 1) % CANDIDATE_SOURCES.size
                     GlassLog.b("MicVoice") {
