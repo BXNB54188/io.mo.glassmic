@@ -93,8 +93,8 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     private var ringPhase = 0.0
     private var tremPhase = 0.0
 
-    /** 变调内核：MicBoost Tone$Grain 的移植版（50ms 三角窗 + 零权重换向）。 */
-    private val grain = GrainShift(sampleRate)
+    /** 变调内核：频域相位声码器（Bernsee STFT），不再有时间轴断裂。 */
+    private val grain = PhaseVocoderPitch(sampleRate)
 
     private val grainRing = FloatArray(GRAIN_RING)
     private var grainWrite = 0
@@ -118,6 +118,8 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         val useLp = lowpassHz > 0f
         val useGate = gateDb > -89f
         val gainNow = gain
+        val useTrem = tremoloHz > 0f && tremoloDepth > 0f
+        val useDrive = drive > 1.01f
 
         if (!useGrain && !useRing && !useHp && !useLp && !useGate && !useTrem && !useDrive &&
             abs(gainNow - 1f) <= 0.01f
@@ -134,9 +136,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             lpK = 1f - exp(-2f * PI.toFloat() * lowpassHz / rate)
         }
         val ringStep = if (useRing) 2.0 * PI * robotHz / rate else 0.0
-        val useTrem = tremoloHz > 0f && tremoloDepth > 0f
-        val tremStep = if (useTrem) 2.0 * PI * tremoloHz / rate else 0.0
-        val useDrive = drive > 1.01f
+        val tremStep = if (tremoloHz > 0f && tremoloDepth > 0f) 2.0 * PI * tremoloHz / rate else 0.0
         val gateLin = 10f.pow(gateDb / 20f)
 
         val end = offset + usable
@@ -159,7 +159,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             }
 
             if (useGrain) {
-                grain.ratio = pitchRatio.toDouble()
+                grain.ratio = pitchRatio
                 s = grain.push(s)
             }
 
@@ -177,7 +177,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
 
             if (useTrem) {
                 val lfo = 0.5 - 0.5 * cos(tremPhase)          // 0..1
-                s *= (1f - tremoloDepth * lfo)
+                s *= (1f - tremoloDepth * lfo.toFloat())
                 tremPhase += tremStep
                 if (tremPhase >= 2.0 * PI) tremPhase -= 2.0 * PI
             }
@@ -214,7 +214,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     }
 
     /** 诊断：[已生成帧数, 累计耗时纳秒, 饥饿采样数(累计)] */
-    fun pitchEngineStats(): LongArray = longArrayOf(grain.produced, 0L, 0L)
+    fun pitchEngineStats(): LongArray = longArrayOf(grain.frames, 0L, 0L)
 
     private fun tap(delay: Double): Float {
         var pos = grainWrite - delay
