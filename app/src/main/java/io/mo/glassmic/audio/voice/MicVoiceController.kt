@@ -96,20 +96,12 @@ class MicVoiceController @Inject constructor(
         var peakWindow = 0
         var peakLogAt = 0L
         var CAPTURE_SOURCE = -1
+        var srcIndex = 0
+        var silentMs = 0L
         try {
             while (running) {
-                // 没人录音就彻底不占麦克风
-                if (!consumerActive) {
-                    if (record != null) {
-                        runCatching { record?.stop() }
-                        runCatching { record?.release() }
-                        record = null
-                    }
-                    Thread.sleep(100)
-                    continue
-                }
                 if (record == null) {
-                    val rec = openRecord()
+                    val rec = openRecord(srcIndex)
                     if (rec == null) {
                         fail("麦克风不可用（检查录音权限或是否被其他应用占用）")
                         return
@@ -150,6 +142,22 @@ class MicVoiceController @Inject constructor(
                     i += 2
                 }
                 if (peak > peakWindow) peakWindow = peak
+
+                // 静音看门狗：某些 ROM 对 UNPROCESSED 等源会"初始化成功但只返回零"，
+                // 初始化失败的回退逻辑抓不到这种情况，这里用实际电平判断并轮换采集源。
+                val blockMs = (n / 2).toLong() * 1000L / SAMPLE_RATE
+                if (peak <= 2) silentMs += blockMs else silentMs = 0
+                if (silentMs >= 1500L) {
+                    silentMs = 0
+                    srcIndex = (srcIndex + 1) % CANDIDATE_SOURCES.size
+                    GlassLog.b("MicVoice") {
+                        "连续静音 1.5s，切换采集源 -> ${CANDIDATE_SOURCES[srcIndex]}"
+                    }
+                    runCatching { record?.stop() }
+                    runCatching { record?.release() }
+                    record = null
+                    continue
+                }
                 val t2 = android.os.SystemClock.uptimeMillis()
                 if (t2 - peakLogAt >= 2000L) {
                     GlassLog.b("MicVoice") {
@@ -172,22 +180,21 @@ class MicVoiceController @Inject constructor(
     }
 
     @Suppress("DEPRECATION")
-    private fun openRecord(): AudioRecord? {
+    private fun openRecord(index: Int): AudioRecord? {
         val minBuf = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
         val bufBytes = maxOf(minBuf, SAMPLE_RATE / 1000 * BYTES_PER_FRAME * BUFFER_MS)
-        for (src in CANDIDATE_SOURCES) {
-            val rec = runCatching {
-                AudioRecord(src, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT, bufBytes)
-            }.getOrNull() ?: continue
-            if (rec.state == AudioRecord.STATE_INITIALIZED) {
-                GlassLog.b("MicVoice") { "采集源 = $src" }
-                return rec
-            }
-            runCatching { rec.release() }
+        val src = CANDIDATE_SOURCES[index % CANDIDATE_SOURCES.size]
+        val rec = runCatching {
+            AudioRecord(src, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT, bufBytes)
+        }.getOrNull() ?: return null
+        if (rec.state == AudioRecord.STATE_INITIALIZED) {
+            GlassLog.b("MicVoice") { "采集源 = $src（第 ${index % CANDIDATE_SOURCES.size} 个候选）" }
+            return rec
         }
+        runCatching { rec.release() }
         return null
     }
 
@@ -204,10 +211,12 @@ class MicVoiceController @Inject constructor(
         const val BUFFER_MS = 20
         const val BLOCK_BYTES = 960     // 10ms @48k mono PCM16
 
+        // MIC 优先：UNPROCESSED 在部分 ROM 上对后台应用只返回零，
+        // 而 MIC 是最基础、最不可能被阉割的源。
         val CANDIDATE_SOURCES = intArrayOf(
-            MediaRecorder.AudioSource.UNPROCESSED,
+            MediaRecorder.AudioSource.MIC,
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            MediaRecorder.AudioSource.MIC
+            MediaRecorder.AudioSource.UNPROCESSED
         )
     }
 }
