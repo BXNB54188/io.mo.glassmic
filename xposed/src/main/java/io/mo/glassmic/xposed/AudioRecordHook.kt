@@ -50,6 +50,9 @@ object AudioRecordHook {
 
     private val voiceStats = WeakHashMap<AudioRecord, VoiceStats>()
 
+    /** 版本戳：每次改 DSP 就 +1，用来确认 LSPosed 到底加载了哪一版 dex。 */
+    private const val VOICE_BUILD = "wsola-3"
+
     /** 首次命中 MIC_VOICE 时打一条日志：用来确认 hook 到底跑没跑。 */
     private val voiceEverHit = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -172,7 +175,7 @@ object AudioRecordHook {
 
         hookMethod(findMethod(AudioRecord::class.java, "release"), ::handleRelease)
 
-        hooker.log(Log.INFO, "installed in $callerPkg")
+        hooker.log(Log.INFO, "installed in $callerPkg (VoiceBuild=$VOICE_BUILD)")
     }
 
     private fun handleByteArray(appCtx: Context, pkg: String, chain: HookCall): HookDecision {
@@ -383,7 +386,7 @@ object AudioRecordHook {
         if (voiceEverHit.compareAndSet(false, true)) {
             Log.i(
                 "GlassMic-MicVoice",
-                "MIC_VOICE 分支首次命中 pkg=$pkg rate=${record.sampleRate} " +
+                "MIC_VOICE 分支首次命中 BUILD=$VOICE_BUILD pkg=$pkg rate=${record.sampleRate} " +
                     "ch=${record.channelCount} fmt=${record.audioFormat} api=${XBridge.apiVersion}"
             )
         }
