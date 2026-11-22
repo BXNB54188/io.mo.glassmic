@@ -34,6 +34,8 @@ object XBridge {
     private val queryPolicy = SourceQueryPolicy()
     @Volatile private var cachedSource: SourceType? = null
     @Volatile private var cachedPkg: String = ""
+    @Volatile private var cachedPreset: String = "off"
+    @Volatile private var cachedPresetPkg: String = ""
     @Volatile private var lastReachable: Boolean = true
 
     private data class ProviderFailure(
@@ -157,6 +159,15 @@ object XBridge {
         return src
     }
 
+    /**
+     * 当前生效的变声预设 id。与 [resolveSource] 共用同一次 Provider 查询，
+     * 不额外增加实时音频线程上的 Binder 调用。
+     */
+    fun resolveVoicePreset(ctx: Context, callerPackage: String): String {
+        val src = resolveSource(ctx, callerPackage)
+        return if (src == SourceType.MIC_VOICE && cachedPresetPkg == callerPackage) cachedPreset else "off"
+    }
+
     /** Keep evidence locally: trying to report a failed Provider through itself would recurse. */
     fun reportProviderFailure(callerPackage: String, operation: String, reason: String) {
         val now = SystemClock.uptimeMillis()
@@ -222,6 +233,10 @@ object XBridge {
                     return SourceType.REAL_MIC
                 }
                 val source = SourceType.valueOf(it.getString(0))
+                if (it.columnCount > 4) {
+                    cachedPreset = it.getString(4) ?: "off"
+                    cachedPresetPkg = pkg
+                }
                 if (!lastReachable) Log.i("GlassMic-Provider", "runtime access recovered package=$pkg")
                 lastReachable = true
                 flushProviderFailures(ctx, pkg, "runtime.")

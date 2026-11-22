@@ -54,9 +54,22 @@ class RuntimeProvider : ContentProvider() {
         recordPackageState(pkg, "last_query_ms", System.currentTimeMillis(), src.name)
         recordPing(pkg, selectionArgs?.getOrNull(1)?.toIntOrNull() ?: 0)
         val snap = resolver.configSnapshot()
-        return MatrixCursor(arrayOf("source", "group_id", "audio_id", "global_switch"))
-            .apply { addRow(arrayOf<Any>(src.name, "", "", if (snap.globalSwitch) 1 else 0)) }
+        return MatrixCursor(
+            arrayOf("source", "group_id", "audio_id", "global_switch", "voice_preset")
+        ).apply {
+            addRow(arrayOf<Any>(src.name, "", "", if (snap.globalSwitch) 1 else 0, voicePreset()))
+        }
     }
+
+    /**
+     * 麦克风变声预设。注入进程不能读本应用的私有目录，只能走这个 Provider，
+     * 所以预设也存在 SharedPreferences 里，随 /resolve 一起返回。
+     */
+    private fun voicePreset(): String = runCatching {
+        context?.getSharedPreferences("mic_voice", Context.MODE_PRIVATE)
+            ?.getString("voice_preset", "off")
+    }.getOrNull() ?: "off"
+
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
         when (method) {

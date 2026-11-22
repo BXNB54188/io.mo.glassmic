@@ -1,7 +1,7 @@
 package io.mo.glassmic.core.model
 
 /** LIVE = 实时抓取另一个 App 的播放声音（root AudioPolicy 回环）；对注入端等同 FILE。 */
-enum class SourceType { REAL_MIC, FILE, SILENCE, TTS, LIVE }
+enum class SourceType { REAL_MIC, FILE, SILENCE, TTS, LIVE, MIC_VOICE }
 
 enum class ScopeMode { GLOBAL, WHITELIST, BLACKLIST }
 

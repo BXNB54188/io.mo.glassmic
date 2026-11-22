@@ -24,6 +24,12 @@ internal sealed interface HookDecision {
 internal interface HookCall {
     val thisObject: Any?
     fun arg(index: Int): Any?
+
+    /**
+     * 调用被 hook 的原方法并返回它的返回值（"先读真麦再处理"用）。
+     * API 101 走 chain.proceed()；legacy API 82 的 before 阶段无法调用原方法，返回 null。
+     */
+    fun proceed(): Any? = null
 }
 
 internal interface MethodHooker {
@@ -60,6 +66,7 @@ internal class ModernHooker(
                 val call = object : HookCall {
                     override val thisObject: Any? get() = chain.getThisObject()
                     override fun arg(index: Int): Any? = chain.getArg(index)
+                    override fun proceed(): Any? = chain.proceed()
                 }
                 when (val decision = decide(this, tag, handler, call)) {
                     HookDecision.Proceed -> chain.proceed()

@@ -6,6 +6,7 @@ import android.media.AudioRecord
 import android.util.Log
 import io.github.libxposed.api.XposedInterface
 import io.mo.glassmic.core.audio.ComfortNoise
+import io.mo.glassmic.core.audio.voice.VoiceChanger
 import io.mo.glassmic.core.model.SourceType
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -24,6 +25,39 @@ object AudioRecordHook {
     private const val TAG = "GlassMic-AudioRec"
 
     private val readers = WeakHashMap<AudioRecord, XposedPcmReader>()
+
+    /** MIC_VOICE 模式的变声器，按 AudioRecord 实例隔离（采样率可能因 App 而异）。 */
+    private val voiceChangers = WeakHashMap<AudioRecord, VoiceChanger>()
+
+    /**
+     * MIC_VOICE：先让目标 App 自己从真麦克风读（它在前台，不会被并发采集规则静音），
+     * 再把读到的那块 PCM 就地变声后还给目标 App。
+     *
+     * 这是唯一能绕开「后台 App 采集一律喂静音」的做法：我们自己不开麦。
+     * legacy API 82 的 before 阶段无法调用原方法，proceed() 返回 null，这里回退到放行。
+     */
+    private fun handleMicVoice(
+        appCtx: Context, pkg: String, chain: HookCall, record: AudioRecord,
+        buf: ByteArray, offset: Int, size: Int
+    ): HookDecision {
+        val raw = chain.proceed()
+        if (raw == null) return HookDecision.Proceed
+        val n = raw as? Int ?: return HookDecision.Replace(raw)
+        if (n > 0 && n <= size &&
+            record.audioFormat == AudioFormat.ENCODING_PCM_16BIT &&
+            record.channelCount == 1
+        ) {
+            runCatching {
+                val changer = synchronized(voiceChangers) {
+                    voiceChangers.getOrPut(record) { VoiceChanger(record.sampleRate) }
+                }
+                VoiceChanger.applyPresetById(changer, XBridge.resolveVoicePreset(appCtx, pkg))
+                changer.process(buf, offset, n)
+            }
+        }
+        accumulate(appCtx, pkg, size, record.sampleRate, record.channelCount)
+        return HookDecision.Replace(n)
+    }
 
     @Volatile private var installed = false
 
@@ -80,6 +114,7 @@ object AudioRecordHook {
         if (!validRange(buf.size, offset, size)) return HookDecision.Proceed
 
         val record = chain.thisObject as AudioRecord
+        if (src == SourceType.MIC_VOICE) return handleMicVoice(appCtx, pkg, chain, record, buf, offset, size)
         if (src == SourceType.SILENCE) {
             // 注入舒适噪声而非纯 0，避免下游 App 把静音判定为"无输入"而中断录音
             val isFloat = record.audioFormat == AudioFormat.ENCODING_PCM_FLOAT

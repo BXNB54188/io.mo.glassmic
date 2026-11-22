@@ -1,5 +1,6 @@
 package io.mo.glassmic.ui.library
 
+import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,8 +24,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import io.mo.glassmic.audio.voice.MicVoiceController
-import io.mo.glassmic.audio.voice.VoiceChanger
+import dagger.hilt.android.qualifiers.ApplicationContext
+import io.mo.glassmic.core.audio.voice.VoiceChanger
 import io.mo.glassmic.core.model.SourceType
 import io.mo.glassmic.data.audio.PlaybackController
 import io.mo.glassmic.data.runtime.RuntimeStateHolder
@@ -33,6 +34,7 @@ import io.mo.glassmic.ui.common.PrimaryButton
 import io.mo.glassmic.ui.common.StatusKind
 import io.mo.glassmic.ui.common.StatusPill
 import io.mo.glassmic.ui.common.glass
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -40,30 +42,45 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+private const val PREFS_MIC_VOICE = "mic_voice"
+private const val KEY_VOICE_PRESET = "voice_preset"
+
 data class MicVoiceUiState(
     val running: Boolean = false,
     val serviceRunning: Boolean = false,
-    val presetId: String = "off",
-    val error: String = ""
+    val presetId: String = "off"
 )
 
-/** 实时麦克风变声：选预设、开始/停止。 */
+/**
+ * 实时麦克风变声。
+ *
+ * 实际处理发生在目标 App 进程里：Hook 让目标 App 自己读真麦克风，再就地变声。
+ * 这里只负责「切换音源状态」和「保存预设」，不自己开麦克风
+ * —— 后台采集会被 Android 的并发采集规则喂静音。
+ */
 @HiltViewModel
 class MicVoiceViewModel @Inject constructor(
+    @ApplicationContext context: Context,
     private val playback: PlaybackController,
-    private val micVoice: MicVoiceController,
     runtime: RuntimeStateHolder
 ) : ViewModel() {
 
-    val state: StateFlow<MicVoiceUiState> = combine(micVoice.status, runtime.flow) { status, rt ->
+    private val prefs = context.getSharedPreferences(PREFS_MIC_VOICE, Context.MODE_PRIVATE)
+
+    private val preset = MutableStateFlow(prefs.getString(KEY_VOICE_PRESET, "off") ?: "off")
+
+    val state: StateFlow<MicVoiceUiState> = combine(runtime.flow, preset) { rt, id ->
         MicVoiceUiState(
-            running = rt.currentSourceType == SourceType.LIVE &&
-                status.phase != MicVoiceController.Phase.IDLE,
+            running = rt.currentSourceType == SourceType.MIC_VOICE,
             serviceRunning = rt.enabled && !rt.safeMode,
-            presetId = status.presetId,
-            error = if (status.phase == MicVoiceController.Phase.ERROR) status.detail else ""
+            presetId = id
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MicVoiceUiState())
+
+    fun choosePreset(id: String) {
+        preset.value = id
+        prefs.edit().putString(KEY_VOICE_PRESET, id).apply()
+    }
 
     fun start() {
         viewModelScope.launch { playback.setMicVoiceSource() }
@@ -72,8 +89,6 @@ class MicVoiceViewModel @Inject constructor(
     fun stop() {
         viewModelScope.launch { playback.setRealMic() }
     }
-
-    fun choosePreset(id: String) = micVoice.setPreset(id)
 }
 
 @Composable
@@ -97,7 +112,7 @@ fun MicVoiceCard(
             if (state.running) StatusPill("运行中", StatusKind.Ok)
         }
         Text(
-            "把真实麦克风实时变声后注入目标 App。全部在本机完成，不联网。",
+            "在目标 App 进程内实时变声：它读到的声音会先被处理再还给它。需要在 LSPosed 里勾选该 App。",
             fontSize = 12.sp, color = t.ink3,
             modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
         )
@@ -125,12 +140,6 @@ fun MicVoiceCard(
                     repeat(3 - rowItems.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
-        }
-        if (state.error.isNotBlank()) {
-            Text(
-                state.error, fontSize = 12.sp, color = t.err,
-                modifier = Modifier.padding(top = 8.dp)
-            )
         }
         if (!state.serviceRunning && !state.running) {
             Text(
