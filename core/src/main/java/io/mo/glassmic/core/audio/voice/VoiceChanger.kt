@@ -77,8 +77,8 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
 
     private var ringPhase = 0.0
 
-    /** WSOLA 变调内核：替代原来的颗粒变调，消除周期性的相位跳变。 */
-    private val wsola = WsolaPitch()
+    /** 变调内核：MicBoost Tone$Grain 的移植版（50ms 三角窗 + 零权重换向）。 */
+    private val grain = GrainShift(sampleRate)
 
     private val grainRing = FloatArray(GRAIN_RING)
     private var grainWrite = 0
@@ -138,8 +138,8 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             }
 
             if (useGrain) {
-                wsola.ratio = pitchRatio
-                s = wsola.push(s)
+                grain.ratio = pitchRatio.toDouble()
+                s = grain.push(s)
             }
 
             if (useLp) {
@@ -179,8 +179,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     }
 
     /** 诊断：[已生成帧数, 累计耗时纳秒, 饥饿采样数(累计)] */
-    fun pitchEngineStats(): LongArray =
-        longArrayOf(wsola.frames, wsola.frameNanos, wsola.starved)
+    fun pitchEngineStats(): LongArray = longArrayOf(grain.produced, 0L, 0L)
 
     private fun tap(delay: Double): Float {
         var pos = grainWrite - delay
@@ -200,7 +199,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         dcX = 0f; dcY = 0f
         ringPhase = 0.0
         grainRing.fill(0f); grainWrite = 0; grainPhase = 0.0
-        wsola.reset()
+        grain.reset()
     }
 
     companion object {
