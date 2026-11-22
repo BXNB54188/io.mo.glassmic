@@ -80,8 +80,11 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     private val grainRing = FloatArray(GRAIN_RING)
     private var grainWrite = 0
     private var grainPhase = 0.0
+    // 三角窗，与 MicBoost 的 Tone$Grain 一致：win[i] = 1 - |2i/W - 1|
+    // 两个抽头相差 W/2 时，win(d) + win(d + W/2) 恒为 1，天然互补，不需要额外归一化。
     private val grainWindow = FloatArray(GRAIN_W) { i ->
-        (0.5 - 0.5 * cos(2.0 * PI * i / GRAIN_W)).toFloat()
+        val x = i.toDouble() / GRAIN_W
+        (1.0 - kotlin.math.abs(x * 2.0 - 1.0)).toFloat()
     }
 
     /** 就地处理 [buf] 中从 [offset] 开始的 [length] 字节（PCM16 单声道）。 */
@@ -198,13 +201,15 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     }
 
     companion object {
-        private const val GRAINS = 4
+        // 2 抽头：4 抽头会让多个不同延迟的副本叠加，对音调信号产生梳状滤波，
+        // 金属味反而更重。MicBoost 也是 2 抽头。
+        private const val GRAINS = 2
         // 窗口 4096（93ms @44.1k）：读头的相位环绕周期 = W/(1-ratio)，
         // 对 -12 半音(ratio 0.5) 从 93ms 拉长到 186ms，跳变次数减半，
         // 听感从"每秒碎 10 次"变成"缓慢起伏"。
         private const val GRAIN_W = 4096
         private const val GRAIN_RING = 16384
-        private const val GRAIN_NORM = 2f   // 4 个 Hann 窗之和恒为 2
+        private const val GRAIN_NORM = 1f   // 三角窗互补，和恒为 1
         private const val SOFT_KNEE = 0.9f
         private const val SOFT_RATIO = 8f
 
