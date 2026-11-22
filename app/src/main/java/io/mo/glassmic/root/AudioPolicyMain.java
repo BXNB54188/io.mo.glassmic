@@ -3,6 +3,7 @@ package io.mo.glassmic.root;
 import android.content.Context;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioRecordingConfiguration;
 import android.media.AudioTrack;
 import android.os.Looper;
 import android.os.Process;
@@ -29,6 +30,7 @@ public final class AudioPolicyMain {
     private static volatile Object policy;
     private static volatile AudioTrack track;
     private static final AtomicBoolean exiting = new AtomicBoolean();
+    private static volatile int[] targetUids = new int[0];
 
     public static void main(String[] args) {
         if (Process.myUid() != 0 || args.length != 2) {
@@ -64,7 +66,9 @@ public final class AudioPolicyMain {
             Class<?> activityThread = Class.forName("android.app.ActivityThread");
             Object thread = activityThread.getMethod("systemMain").invoke(null);
             context = (Context) activityThread.getMethod("getSystemContext").invoke(thread);
+            targetUids = uids;
             register(uids);
+            startRecordingProbe();
             new Thread(() -> {
                 try {
                     pump(args[1]);
@@ -140,6 +144,37 @@ public final class AudioPolicyMain {
         }
         track.setBufferSizeInFrames(4800); // Bound stale audio to about 100 ms where supported.
         track.play();
+    }
+
+    /**
+     * 每 500ms 查一次目标 UID 是否真的有录音客户端在线，变化时向 stdout 打一行 RECORDING 0/1。
+     * 只有 root 进程能拿到全量的 getActiveRecordingConfigurations()，普通应用只能看到自己。
+     */
+    private static void startRecordingProbe() {
+        new Thread(() -> {
+            boolean last = false;
+            AudioManager am = null;
+            try { am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE); } catch (Throwable ignored) { }
+            if (am == null) return;
+            while (!exiting.get()) {
+                boolean rec = false;
+                try {
+                    for (AudioRecordingConfiguration cfg : am.getActiveRecordingConfigurations()) {
+                        int uid = cfg.getClientUid();
+                        for (int u : targetUids) {
+                            if (u == uid) { rec = true; break; }
+                        }
+                        if (rec) break;
+                    }
+                } catch (Throwable ignored) { }
+                if (rec != last) {
+                    System.out.println("RECORDING " + (rec ? 1 : 0));
+                    System.out.flush();
+                    last = rec;
+                }
+                SystemClock.sleep(500);
+            }
+        }, "glassmic-rec-probe").start();
     }
 
     private static void pump(String fifo) throws Exception {

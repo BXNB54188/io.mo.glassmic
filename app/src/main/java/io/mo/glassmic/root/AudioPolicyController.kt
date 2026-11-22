@@ -66,6 +66,10 @@ class AudioPolicyController @Inject constructor(
     private val retryVersion = AtomicLong()
     private val mutableStatus = MutableStateFlow(PolicyStatus())
     val status = mutableStatus.asStateFlow()
+
+    /** 目标 App 是否真的有录音客户端在线（由 root 子进程探测上报）。 */
+    private val mutableRecording = MutableStateFlow(false)
+    val targetRecording = mutableRecording.asStateFlow()
     private var watcher: Job? = null // Accessed on the service's main thread.
     private var session: Session? = null // Accessed only while holding lifecycleMutex.
 
@@ -317,6 +321,9 @@ class AudioPolicyController @Inject constructor(
                             line.reset()
                             when {
                                 text == "READY" -> current.ready.complete(Unit)
+                                text.startsWith("RECORDING ") -> {
+                                    mutableRecording.value = text.removePrefix("RECORDING ").trim() == "1"
+                                }
                                 text.startsWith("ERROR ") -> {
                                     current.error = text.removePrefix("ERROR ").take(500)
                                     current.ready.completeExceptionally(IOException(current.error))

@@ -70,6 +70,7 @@ class PlaybackController @Inject constructor(
     private val ttsProgress: TtsProgress,
     private val liveCapture: LiveCaptureController,
     private val micVoice: MicVoiceController,
+    private val audioPolicy: io.mo.glassmic.root.AudioPolicyController,
     @ApplicationContext private val context: Context
 ) : MemoryReleasable {
     private val sourceSwitchMutex = Mutex()
@@ -398,7 +399,9 @@ class PlaybackController @Inject constructor(
         micWatch?.cancel()
         micWatch = scope.launch {
             while (isActive && runtime.value.currentSourceType != SourceType.REAL_MIC) {
-                micVoice.setConsumerActive(publisher.consumerCount > 0)
+                // 用 root 子进程探测到的"目标是否真的在录音"作为判据，
+                // 注入轨道自己的 consumer 不能作为判据（它永远在线）。
+                micVoice.setConsumerActive(audioPolicy.targetRecording.value)
                 delay(200)
             }
             micVoice.setConsumerActive(false)
