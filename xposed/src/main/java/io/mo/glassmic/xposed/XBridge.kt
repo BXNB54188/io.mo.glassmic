@@ -99,6 +99,10 @@ object XBridge {
         channels: Int,
         nativeDiagnostics: Bundle? = null
     ) {
+        // 关键：这个函数会被 hook 在目标 App 的音频读取线程上调用。
+        // 同步 Binder 会让 read() 周期性变慢 —— 听感就是"卡段"。
+        // 统一丢到诊断线程，音频线程只做一次入队。
+        pcmReportExecutor.execute {
         runCatching {
             val extras = Bundle().apply {
                 putString("package", callerPackage)
@@ -115,6 +119,7 @@ object XBridge {
                 callerPackage,
                 extras
             )
+        }
         }
     }
 

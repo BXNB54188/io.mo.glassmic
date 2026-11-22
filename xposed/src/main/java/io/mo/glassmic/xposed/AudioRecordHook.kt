@@ -3,6 +3,7 @@ package io.mo.glassmic.xposed
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.os.SystemClock
 import android.util.Log
 import io.github.libxposed.api.XposedInterface
 import io.mo.glassmic.core.audio.ComfortNoise
@@ -29,6 +30,22 @@ object AudioRecordHook {
     /** MIC_VOICE 模式的变声器，按 AudioRecord 实例隔离（采样率可能因 App 而异）。 */
     private val voiceChangers = WeakHashMap<AudioRecord, VoiceChanger>()
 
+    /** 每个 AudioRecord 的诊断计数：用来定位"卡段"到底是 DSP 慢还是 Binder 慢。 */
+    private class VoiceStats {
+        var paramsEncoded: String = ""
+        var paramsAt: Long = 0L
+        var logAt: Long = 0L
+        var reads: Long = 0L
+        var bytes: Long = 0L
+        var dspNanos: Long = 0L
+        var maxDspNanos: Long = 0L
+        var slowReads: Long = 0L
+        var lastReadAt: Long = 0L
+        var maxGapMs: Long = 0L
+    }
+
+    private val voiceStats = WeakHashMap<AudioRecord, VoiceStats>()
+
     /**
      * MIC_VOICE：先让目标 App 自己从真麦克风读（它在前台，不会被并发采集规则静音），
      * 再把读到的那块 PCM 就地变声后还给目标 App。
@@ -43,6 +60,16 @@ object AudioRecordHook {
         val raw = chain.proceed()
         if (raw == null) return HookDecision.Proceed
         val n = raw as? Int ?: return HookDecision.Replace(raw)
+        val st = synchronized(voiceStats) { voiceStats.getOrPut(record) { VoiceStats() } }
+        val now = SystemClock.uptimeMillis()
+
+        // 记录两次 read 之间的最大间隔：这个数字直接反映"卡段"
+        if (st.lastReadAt > 0L) {
+            val gap = now - st.lastReadAt
+            if (gap > st.maxGapMs) st.maxGapMs = gap
+        }
+        st.lastReadAt = now
+
         if (n > 0 && n <= size &&
             record.audioFormat == AudioFormat.ENCODING_PCM_16BIT &&
             record.channelCount == 1
@@ -51,11 +78,40 @@ object AudioRecordHook {
                 val changer = synchronized(voiceChangers) {
                     voiceChangers.getOrPut(record) { VoiceChanger(record.sampleRate) }
                 }
-                VoiceChanger.applyEncoded(changer, XBridge.resolveVoicePreset(appCtx, pkg))
+                // 参数查询是 Binder，最多每 500ms 做一次；否则只用本地缓存，
+                // 避免在音频线程上周期性抖动。
+                if (now - st.paramsAt >= 500L) {
+                    st.paramsAt = now
+                    val enc = XBridge.resolveVoicePreset(appCtx, pkg)
+                    st.paramsEncoded = enc
+                    VoiceChanger.applyEncoded(changer, enc)
+                } else if (st.paramsEncoded.isNotEmpty() && changer.signature != st.paramsEncoded) {
+                    VoiceChanger.applyEncoded(changer, st.paramsEncoded)
+                }
+
+                val t0 = System.nanoTime()
                 changer.process(buf, offset, n)
+                val dt = System.nanoTime() - t0
+                st.reads++
+                st.bytes += n.toLong()
+                st.dspNanos += dt
+                if (dt > st.maxDspNanos) st.maxDspNanos = dt
             }
         }
         accumulate(appCtx, pkg, size, record.sampleRate, record.channelCount)
+
+        if (now - st.logAt >= 2000L) {
+            val reads = if (st.reads > 0L) st.reads else 1L
+            Log.i(
+                "GlassMic-MicVoice",
+                "reads=${st.reads} bytes=${st.bytes} avgDspUs=${st.dspNanos / 1000 / reads} " +
+                    "maxDspUs=${st.maxDspNanos / 1000} maxGapMs=${st.maxGapMs} " +
+                    "rate=${record.sampleRate} ch=${record.channelCount} " +
+                    "fmt=${record.audioFormat} params=${st.paramsEncoded}"
+            )
+            st.logAt = now
+            st.reads = 0L; st.bytes = 0L; st.dspNanos = 0L; st.maxDspNanos = 0L; st.maxGapMs = 0L
+        }
         return HookDecision.Replace(n)
     }
 
