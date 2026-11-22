@@ -372,6 +372,12 @@ class PlaybackController @Inject constructor(
         // AudioPolicy 注入后端：本进程开麦 → DSP → Publisher → AudioPolicy 注入 Track。
         // 注入生效后目标 App 的 AudioRecord 由系统从注入 Track 取数据，不再占用真实麦克风，
         // 因此这里不会被并发采集规则判静音。
+        // 诊断：把当前注入后端和目标一起打出来，确认是不是真的切到了 AudioPolicy
+        val cfg = configStore.current()
+        GlassLog.b("MicVoice") {
+            "注入后端 = ${cfg.injectionBackend} 全局开关=${cfg.globalSwitch} " +
+                "目标=${cfg.audioPolicyTargets().size}个 全部应用=${cfg.audioPolicyAllApps}"
+        }
         val src = try {
             micVoice.open()
         } catch (error: Exception) {

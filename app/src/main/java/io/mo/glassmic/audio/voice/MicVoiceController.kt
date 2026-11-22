@@ -78,6 +78,9 @@ class MicVoiceController @Inject constructor(
         runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) }
         val buf = ByteArray(BLOCK_BYTES)
         var lastParamsAt = 0L
+        var peakWindow = 0
+        var peakLogAt = 0L
+        var CAPTURE_SOURCE = -1
         try {
             val rec = openRecord()
             if (rec == null) {
@@ -85,6 +88,7 @@ class MicVoiceController @Inject constructor(
                 return
             }
             record = rec
+            CAPTURE_SOURCE = rec.audioSource
             rec.startRecording()
             if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                 fail("麦克风启动失败")
@@ -106,6 +110,27 @@ class MicVoiceController @Inject constructor(
                     Thread.sleep(2)
                     continue
                 }
+                // 电平诊断：每 2 秒打一次峰值。
+                // peak = 0 说明系统把我们的采集喂了静音（后台采集限制），
+                // 与被注入端无关，必须先解决权限/appops。
+                var peak = 0
+                var i = 0
+                while (i < n) {
+                    val v = ((buf[i].toInt() and 0xFF) or (buf[i + 1].toInt() shl 8)).toShort().toInt()
+                    val a = if (v < 0) -v else v
+                    if (a > peak) peak = a
+                    i += 2
+                }
+                if (peak > peakWindow) peakWindow = peak
+                val t2 = android.os.SystemClock.uptimeMillis()
+                if (t2 - peakLogAt >= 2000L) {
+                    GlassLog.b("MicVoice") {
+                        "capture peak=$peakWindow (0~32767) 源=$CAPTURE_SOURCE 块=$n 字节"
+                    }
+                    peakWindow = 0
+                    peakLogAt = t2
+                }
+
                 changer.process(buf, 0, n)
                 src.push(buf, n)
             }
