@@ -7,7 +7,7 @@ import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.pow
 
-/** 一个变声预设。 */
+/** 一个变声预设。参数可被 UI 继续微调。 */
 data class VoicePreset(
     val id: String,
     val label: String,
@@ -22,18 +22,20 @@ data class VoicePreset(
 /**
  * 实时变声 DSP（纯 Kotlin，零 Android 依赖）。
  *
- * 同时被 app 进程和**注入到目标 App 的 xposed 进程**使用，所以放在 core：
- * core 不允许依赖 androidx / Hilt，这里正好只有 kotlin.math。
+ * 同时被 app 进程和注入到目标 App 的 xposed 进程使用，所以放在 core。
  *
- * 链路：低频阻断 → 环形调制 → 颗粒变调 → 高频衰减 → 噪声门 → 增益 → 限幅
+ * 链路：DC 阻断 → 低频阻断 → 环形调制 → **4 颗粒变调** → 高频衰减 → 噪声门 → 增益 → 软限幅
  *
- * 采样率由构造参数决定（目标 App 常见 44100，我们自己的主时钟是 48000）。
- * pitch = 0 时颗粒变调整级旁路，只留几个采样的开销。
+ * 颗粒变调用 4 个 Hann 窗读头，间隔 W/4：
+ * 四个窗之和恒为 2，除以 2 归一化，交叉点从 2 个摊薄到 4 个，
+ * 大幅压制双颗粒方案的"金属颗粒感"。
+ *
+ * pitch = 0 时整级旁路。
  */
 class VoiceChanger(val sampleRate: Int = 48_000) {
 
-    /** 当前生效的预设 id，用于避免重复应用同一个预设。 */
-    var presetId: String = "off"
+    /** 当前参数签名，用于避免重复应用同一套参数。 */
+    var signature: String = ""
 
     var pitchSemitones: Float = 0f
         set(value) { field = value.coerceIn(-24f, 24f) }
@@ -45,15 +47,21 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         set(value) { field = if (value <= 1f) 0f else value.coerceIn(20f, 6000f) }
 
     var lowpassHz: Float = 0f
-        set(value) { field = if (value <= 1f) 0f else value.coerceIn(300f, 20000f) }
+        set(value) { field = if (value <= 1f) 0f else value.coerceIn(300f, 16000f) }
 
     var gateDb: Float = -90f
         set(value) { field = value.coerceIn(-90f, 0f) }
 
     var gain: Float = 1f
-        set(value) { field = value.coerceIn(0f, 8f) }
+        set(value) { field = value.coerceIn(0f, 4f) }
 
     private val rate: Float = sampleRate.coerceIn(8_000, 192_000).toFloat()
+    private val nrRate: Int = sampleRate.coerceIn(8_000, 192_000)
+
+    // 常开 DC 阻断（约 18Hz），颗粒变调会带直流分量，表现为低频闷响
+    private val dcA = 1f / (1f + 2f * PI.toFloat() * 18f / rate)
+    private var dcX = 0f
+    private var dcY = 0f
 
     private var hpA = 0f
     private var hpX1 = 0f
@@ -67,11 +75,6 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     private var gateEnv = 0f
     private var gateOpen = false
 
-    // 常开 DC 阻断（约 18Hz 一阶高通），系数按构造时的采样率算死
-    private val dcA = 1f / (1f + 2f * PI.toFloat() * 18f / sampleRate.coerceIn(8_000, 192_000))
-    private var dcX = 0f
-    private var dcY = 0f
-
     private var ringPhase = 0.0
 
     private val grainRing = FloatArray(GRAIN_RING)
@@ -81,7 +84,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         (0.5 - 0.5 * cos(2.0 * PI * i / GRAIN_W)).toFloat()
     }
 
-    /** 就地处理 [buf] 中从 [offset] 开始的 [length] 个字节（PCM16 单声道）。 */
+    /** 就地处理 [buf] 中从 [offset] 开始的 [length] 字节（PCM16 单声道）。 */
     fun process(buf: ByteArray, offset: Int, length: Int): Boolean {
         val usable = length and 0x7FFFFFFE
         if (usable <= 0 || offset < 0 || offset + usable > buf.size) return false
@@ -114,14 +117,13 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         while (i < end) {
             var s = ((buf[i].toInt() and 0xFF) or (buf[i + 1].toInt() shl 8)).toShort().toFloat() / 32768f
 
+            val dc = dcA * (dcY + s - dcX)
+            dcX = s; dcY = dc; s = dc
+
             if (useHp) {
                 val y = hpA * (hpY1 + s - hpX1)
                 hpX1 = s; hpY1 = y; s = y
             }
-
-            // 常开 DC 阻断：颗粒变调会引入直流分量，表现为低频"砰/咚"的闷响。
-            val dc = dcA * (dcY + s - dcX)
-            dcX = s; dcY = dc; s = dc
 
             if (useRing) {
                 s *= cos(ringPhase).toFloat()
@@ -131,11 +133,13 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
 
             if (useGrain) {
                 grainRing[grainWrite] = s
-                val w1 = grainWindow[grainPhase.toInt() % GRAIN_W]
-                val w2 = grainWindow[(grainPhase.toInt() + GRAIN_W / 2) % GRAIN_W]
-                val d1 = grainPhase
-                val d2 = (grainPhase + GRAIN_W / 2.0) % GRAIN_W
-                s = tap(d1) * w1 + tap(d2) * w2
+                var acc = 0f
+                for (g in 0 until GRAINS) {
+                    val d = (grainPhase + g * GRAIN_W / GRAINS) % GRAIN_W
+                    val w = grainWindow[d.toInt() % GRAIN_W]
+                    acc += tap(d) * w
+                }
+                s = acc / GRAIN_NORM
                 grainWrite = (grainWrite + 1) % GRAIN_RING
                 grainPhase += 1.0 - pitchRatio
                 while (grainPhase < 0.0) grainPhase += GRAIN_W.toDouble()
@@ -156,8 +160,6 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             }
 
             s *= gainNow
-            // 软限幅：0.9 以下原样通过，超过部分用指数曲线压回去。
-            // 原来是硬 clamp(±1)，溢出时直接切成方波，听起来就是"爆音"。
             val amp = if (s < 0f) -s else s
             if (amp > SOFT_KNEE) {
                 val over = amp - SOFT_KNEE
@@ -196,14 +198,15 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     }
 
     companion object {
-        // 窗口从 1024 提到 2048：幅度更大的变调（如 +12 半音）时，
-        // 相位环绕周期翻倍，颗粒抖动率减半，听起来不再"炸"。
+        private const val GRAINS = 4
         private const val GRAIN_W = 2048
         private const val GRAIN_RING = 8192
+        private const val GRAIN_NORM = 2f   // 4 个 Hann 窗之和恒为 2
         private const val SOFT_KNEE = 0.9f
         private const val SOFT_RATIO = 8f
 
-        val DEFAULT_SAMPLE_RATE = 48_000
+        const val DEFAULT_SAMPLE_RATE = 48_000
+        const val PARAM_FALLBACK = "off|0|0|0|0|-90|1.0"
 
         val PRESETS: List<VoicePreset> = listOf(
             VoicePreset("off", "原声", 0f),
@@ -218,22 +221,33 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
 
         fun presetById(id: String): VoicePreset? = PRESETS.firstOrNull { it.id == id }
 
-        fun applyPreset(target: VoiceChanger, preset: VoicePreset) {
-            target.reset()
-            target.pitchSemitones = preset.pitchSemitones
-            target.robotHz = preset.robotHz
-            target.highpassHz = preset.highpassHz
-            target.lowpassHz = preset.lowpassHz
-            target.gateDb = preset.gateDb
-            target.gain = preset.gain
-            target.presetId = preset.id
-        }
+        /** 编码成 `id|pitch|robot|hp|lp|gate|gain`，跨进程只传这一条字符串。 */
+        fun encode(id: String, p: VoicePreset): String =
+            "$id|${p.pitchSemitones}|${p.robotHz}|${p.highpassHz}|${p.lowpassHz}|${p.gateDb}|${p.gain}"
 
-        fun applyPresetById(target: VoiceChanger, id: String): Boolean {
-            val p = presetById(id) ?: return false
-            if (target.presetId == id) return true
-            applyPreset(target, p)
+        fun encodeCurrent(id: String, c: VoiceChanger): String =
+            "$id|${c.pitchSemitones}|${c.robotHz}|${c.highpassHz}|${c.lowpassHz}|${c.gateDb}|${c.gain}"
+
+        /** 解析并应用；签名没变就直接返回 false，不打断 DSP 状态。 */
+        fun applyEncoded(target: VoiceChanger, encoded: String): Boolean {
+            val raw = encoded.ifBlank { PARAM_FALLBACK }
+            if (target.signature == raw) return false
+            val f = raw.split('|')
+            if (f.size < 7) {
+                target.signature = raw
+                return false
+            }
+            target.pitchSemitones = f[1].toFloatOrNull() ?: 0f
+            target.robotHz = f[2].toFloatOrNull() ?: 0f
+            target.highpassHz = f[3].toFloatOrNull() ?: 0f
+            target.lowpassHz = f[4].toFloatOrNull() ?: 0f
+            target.gateDb = f[5].toFloatOrNull() ?: -90f
+            target.gain = f[6].toFloatOrNull() ?: 1f
+            target.signature = raw
             return true
         }
+
+        /** 由预设生成编码串。 */
+        fun encodePreset(preset: VoicePreset): String = encode(preset.id, preset)
     }
 }

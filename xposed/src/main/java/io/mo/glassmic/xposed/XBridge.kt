@@ -34,7 +34,7 @@ object XBridge {
     private val queryPolicy = SourceQueryPolicy()
     @Volatile private var cachedSource: SourceType? = null
     @Volatile private var cachedPkg: String = ""
-    @Volatile private var cachedPreset: String = "off"
+    @Volatile private var cachedPreset: String = "off|0|0|0|0|-90|1.0"
     @Volatile private var cachedPresetPkg: String = ""
     @Volatile private var lastReachable: Boolean = true
 
@@ -234,7 +234,7 @@ object XBridge {
                 }
                 val source = SourceType.valueOf(it.getString(0))
                 if (it.columnCount > 4) {
-                    cachedPreset = it.getString(4) ?: "off"
+                    cachedPreset = it.getString(4) ?: "off|0|0|0|0|-90|1.0"
                     cachedPresetPkg = pkg
                 }
                 if (!lastReachable) Log.i("GlassMic-Provider", "runtime access recovered package=$pkg")

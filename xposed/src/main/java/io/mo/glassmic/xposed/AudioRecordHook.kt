@@ -51,7 +51,7 @@ object AudioRecordHook {
                 val changer = synchronized(voiceChangers) {
                     voiceChangers.getOrPut(record) { VoiceChanger(record.sampleRate) }
                 }
-                VoiceChanger.applyPresetById(changer, XBridge.resolveVoicePreset(appCtx, pkg))
+                VoiceChanger.applyEncoded(changer, XBridge.resolveVoicePreset(appCtx, pkg))
                 changer.process(buf, offset, n)
             }
         }
