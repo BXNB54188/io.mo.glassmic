@@ -136,6 +136,10 @@ object NativeAAudioHook {
                         SourceType.REAL_MIC -> 0
                         SourceType.FILE, SourceType.TTS, SourceType.LIVE -> 1
                         SourceType.SILENCE -> 2
+                        // MIC_VOICE 的「先读真麦、再原地变声」只在 Java 层实现；
+                        // native AAudio / OpenSL 路径没有 proceed-then-modify 能力，
+                        // 这里放行真麦（不变声），避免把原生录音搞成静音。
+                        SourceType.MIC_VOICE -> 0
                     }
                     nativeSetDecision(decisionCode)
                     if (lastSource != src) {
