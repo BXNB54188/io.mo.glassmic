@@ -67,6 +67,11 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     private var gateEnv = 0f
     private var gateOpen = false
 
+    // 常开 DC 阻断（约 18Hz 一阶高通），系数按构造时的采样率算死
+    private val dcA = 1f / (1f + 2f * PI.toFloat() * 18f / sampleRate.coerceIn(8_000, 192_000))
+    private var dcX = 0f
+    private var dcY = 0f
+
     private var ringPhase = 0.0
 
     private val grainRing = FloatArray(GRAIN_RING)
@@ -114,6 +119,10 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
                 hpX1 = s; hpY1 = y; s = y
             }
 
+            // 常开 DC 阻断：颗粒变调会引入直流分量，表现为低频"砰/咚"的闷响。
+            val dc = dcA * (dcY + s - dcX)
+            dcX = s; dcY = dc; s = dc
+
             if (useRing) {
                 s *= cos(ringPhase).toFloat()
                 ringPhase += ringStep
@@ -147,7 +156,14 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             }
 
             s *= gainNow
-            if (s > 1f) s = 1f else if (s < -1f) s = -1f
+            // 软限幅：0.9 以下原样通过，超过部分用指数曲线压回去。
+            // 原来是硬 clamp(±1)，溢出时直接切成方波，听起来就是"爆音"。
+            val amp = if (s < 0f) -s else s
+            if (amp > SOFT_KNEE) {
+                val over = amp - SOFT_KNEE
+                val limited = SOFT_KNEE + (1f - SOFT_KNEE) * (1f - exp(-over * SOFT_RATIO))
+                s = if (s < 0f) -limited else limited
+            }
 
             val v = (s * 32767f).toInt()
             buf[i] = (v and 0xFF).toByte()
@@ -174,25 +190,30 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         hpX1 = 0f; hpY1 = 0f
         lpY1 = 0f
         gateEnv = 0f; gateOpen = false
+        dcX = 0f; dcY = 0f
         ringPhase = 0.0
         grainRing.fill(0f); grainWrite = 0; grainPhase = 0.0
     }
 
     companion object {
-        private const val GRAIN_W = 1024
-        private const val GRAIN_RING = 4096
+        // 窗口从 1024 提到 2048：幅度更大的变调（如 +12 半音）时，
+        // 相位环绕周期翻倍，颗粒抖动率减半，听起来不再"炸"。
+        private const val GRAIN_W = 2048
+        private const val GRAIN_RING = 8192
+        private const val SOFT_KNEE = 0.9f
+        private const val SOFT_RATIO = 8f
 
         val DEFAULT_SAMPLE_RATE = 48_000
 
         val PRESETS: List<VoicePreset> = listOf(
             VoicePreset("off", "原声", 0f),
-            VoicePreset("child", "童声", 7f, highpassHz = 120f, gain = 1.1f),
+            VoicePreset("child", "童声", 7f, highpassHz = 120f, gain = 1.05f),
             VoicePreset("chipmunk", "花栗鼠", 12f, highpassHz = 200f),
-            VoicePreset("deep", "低沉大叔", -6f, lowpassHz = 4500f, gain = 1.2f),
-            VoicePreset("monster", "怪兽", -12f, lowpassHz = 3200f, gain = 1.4f),
+            VoicePreset("deep", "低沉大叔", -6f, lowpassHz = 4500f, gain = 1.1f),
+            VoicePreset("monster", "怪兽", -12f, lowpassHz = 3200f, gain = 1.2f),
             VoicePreset("robot", "机器人", 0f, robotHz = 55f, lowpassHz = 6000f),
             VoicePreset("alien", "外星人", 5f, robotHz = 120f, highpassHz = 300f),
-            VoicePreset("phone", "电话音", 0f, highpassHz = 400f, lowpassHz = 3400f, gain = 1.6f)
+            VoicePreset("phone", "电话音", 0f, highpassHz = 400f, lowpassHz = 3400f, gain = 1.3f)
         )
 
         fun presetById(id: String): VoicePreset? = PRESETS.firstOrNull { it.id == id }
