@@ -1,9 +1,12 @@
 package io.mo.glassmic.audio.voice
 
+import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import dagger.hilt.android.qualifiers.ApplicationContext
 import io.mo.glassmic.audio.LiveCaptureSource
+import io.mo.glassmic.core.audio.voice.VoiceChanger
 import io.mo.glassmic.log.GlassLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,72 +15,61 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 实时变声会话：把真实麦克风采集下来，过 [VoiceChanger] 处理，再推进 [LiveCaptureSource]。
+ * 实时变声会话：自己打开麦克风，逐块变声，推进 [LiveCaptureSource]。
  *
- * 和 [io.mo.glassmic.root.LiveCaptureController] 的区别：那条路是 root 子进程抓「别的 App 的播放声音」，
- * 这条是 GlassMic 自己开麦克风（App 已声明 RECORD_AUDIO），所以不需要 root 子进程、也不需要 FIFO。
+ * 配合 **AudioPolicy 注入后端**使用：
+ *   mic → 本类(DSP) → Publisher → AudioPolicyController → AudioTrack(INJECTOR) → 目标 App 的录音
  *
- * 采集源优先 UNPROCESSED（最干净、延迟最低），失败依次退 VOICE_COMMUNICATION、MIC。
+ * 这条路不依赖 LSPosed Hook：目标 App 的 AudioRecord 由系统从注入 Track 取数据，
+ * 因此它不会再占用真实麦克风，我们这边也就不会被"并发采集规则"判静音。
  */
 @Singleton
-class MicVoiceController @Inject constructor() {
-
+class MicVoiceController @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
     enum class Phase { IDLE, ACTIVE, ERROR }
 
     data class Status(
         val phase: Phase = Phase.IDLE,
-        val detail: String = "",
-        val presetId: String = PRESETS_FIRST_ID
+        val detail: String = ""
     )
 
     private val _status = MutableStateFlow(Status())
     val status: StateFlow<Status> = _status.asStateFlow()
 
-    /** 当前生效的变声参数，UI 改预设时直接改它。 */
-    val changer = VoiceChanger()
+    private val changer = VoiceChanger(48_000)
 
     @Volatile private var source: LiveCaptureSource? = null
     @Volatile private var record: AudioRecord? = null
     @Volatile private var thread: Thread? = null
     @Volatile private var running = false
 
-    fun setPreset(id: String) {
-        val preset = VoiceChanger.PRESETS.firstOrNull { it.id == id } ?: return
-        VoiceChanger.applyPreset(changer, preset)
-        _status.value = _status.value.copy(presetId = preset.id)
-        GlassLog.b("MicVoice") { "预设切换 -> ${preset.label}" }
-    }
+    private val prefs by lazy { context.getSharedPreferences("mic_voice", Context.MODE_PRIVATE) }
 
-    /**
-     * 开始采集并返回可交给 Publisher 的音源。重复调用会先结束上一个会话。
-     * 返回的 source 被 Publisher 释放（换音源）时会自动回调 [close]。
-     */
     fun open(): LiveCaptureSource {
         close()
-        val src = LiveCaptureSource(SESSION_TAG) { released ->
-            if (released === source) close()
-        }
+        val src = LiveCaptureSource(SESSION_TAG) { released -> if (released === source) close() }
         source = src
         running = true
-        _status.value = _status.value.copy(phase = Phase.ACTIVE, detail = "")
+        _status.value = Status(Phase.ACTIVE, "")
         thread = Thread({ captureLoop(src) }, "glassmic-micvoice").apply {
             isDaemon = true
             start()
         }
-        GlassLog.b("MicVoice") { "开始麦克风变声，预设=${_status.value.presetId}" }
+        GlassLog.b("MicVoice") { "开始麦克风变声" }
         return src
     }
 
     fun close() {
-        val wasRunning = running
+        val was = running
         running = false
-        thread?.let { t -> runCatching { t.join(500) } }
+        thread?.let { runCatching { it.join(500) } }
         thread = null
         runCatching { record?.stop() }
         record = null
         source = null
-        if (wasRunning) {
-            _status.value = _status.value.copy(phase = Phase.IDLE, detail = "")
+        if (was) {
+            _status.value = Status(Phase.IDLE, "")
             GlassLog.b("MicVoice") { "已结束麦克风变声" }
         }
     }
@@ -85,6 +77,7 @@ class MicVoiceController @Inject constructor() {
     private fun captureLoop(src: LiveCaptureSource) {
         runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) }
         val buf = ByteArray(BLOCK_BYTES)
+        var lastParamsAt = 0L
         try {
             val rec = openRecord()
             if (rec == null) {
@@ -98,6 +91,12 @@ class MicVoiceController @Inject constructor() {
                 return
             }
             while (running) {
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastParamsAt >= 300L) {
+                    lastParamsAt = now
+                    val encoded = prefs.getString("voice_params", null)
+                    if (encoded != null) VoiceChanger.applyEncoded(changer, encoded)
+                }
                 val n = rec.read(buf, 0, buf.size)
                 if (n < 0) {
                     fail("麦克风读取错误 $n")
@@ -107,7 +106,7 @@ class MicVoiceController @Inject constructor() {
                     Thread.sleep(2)
                     continue
                 }
-                changer.process(buf, n)
+                changer.process(buf, 0, n)
                 src.push(buf, n)
             }
         } catch (t: Throwable) {
@@ -122,24 +121,16 @@ class MicVoiceController @Inject constructor() {
     @Suppress("DEPRECATION")
     private fun openRecord(): AudioRecord? {
         val minBuf = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
+            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
-        // 20ms 缓冲：比 HAL 最小缓冲略大，抗一次调度抖动，又不至于明显加延迟
         val bufBytes = maxOf(minBuf, SAMPLE_RATE / 1000 * BYTES_PER_FRAME * BUFFER_MS)
-        for (source in CANDIDATE_SOURCES) {
+        for (src in CANDIDATE_SOURCES) {
             val rec = runCatching {
-                AudioRecord(
-                    source,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufBytes
-                )
+                AudioRecord(src, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT, bufBytes)
             }.getOrNull() ?: continue
             if (rec.state == AudioRecord.STATE_INITIALIZED) {
-                GlassLog.b("MicVoice") { "采集源 = $source" }
+                GlassLog.b("MicVoice") { "采集源 = $src" }
                 return rec
             }
             runCatching { rec.release() }
@@ -149,7 +140,7 @@ class MicVoiceController @Inject constructor() {
 
     private fun fail(message: String) {
         running = false
-        _status.value = _status.value.copy(phase = Phase.ERROR, detail = message)
+        _status.value = Status(Phase.ERROR, message)
         GlassLog.b("MicVoice") { "错误: $message" }
     }
 
@@ -158,8 +149,7 @@ class MicVoiceController @Inject constructor() {
         const val SAMPLE_RATE = 48_000
         const val BYTES_PER_FRAME = 2
         const val BUFFER_MS = 20
-        const val BLOCK_BYTES = 480          // 5ms @ 48k mono PCM16
-        const val PRESETS_FIRST_ID = "off"
+        const val BLOCK_BYTES = 960     // 10ms @48k mono PCM16
 
         val CANDIDATE_SOURCES = intArrayOf(
             MediaRecorder.AudioSource.UNPROCESSED,

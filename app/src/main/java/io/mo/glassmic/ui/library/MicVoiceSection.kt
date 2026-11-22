@@ -30,6 +30,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.mo.glassmic.audio.voice.MicVoiceController
 import io.mo.glassmic.core.audio.voice.VoiceChanger
 import io.mo.glassmic.core.model.SourceType
 import io.mo.glassmic.data.audio.PlaybackController
@@ -119,15 +120,20 @@ data class MicVoiceUiState(
 class MicVoiceViewModel @Inject constructor(
     @ApplicationContext context: Context,
     private val playback: PlaybackController,
+    private val micVoice: MicVoiceController,
     runtime: RuntimeStateHolder
 ) : ViewModel() {
 
     private val prefs = context.getSharedPreferences(PREFS_MIC_VOICE, Context.MODE_PRIVATE)
     private val params = MutableStateFlow(VoiceParams.decode(prefs.getString(KEY_VOICE_PARAMS, null)))
 
-    val state: StateFlow<MicVoiceUiState> = combine(runtime.flow, params) { rt, p ->
+    val state: StateFlow<MicVoiceUiState> = combine(
+        runtime.flow, params, micVoice.status
+    ) { rt, p, st ->
         MicVoiceUiState(
-            running = rt.currentSourceType == SourceType.MIC_VOICE,
+            // 音源类型是 LIVE（复用 LiveCaptureSource），实际是否在跑看控制器状态
+            running = rt.currentSourceType == SourceType.LIVE &&
+                st.phase == MicVoiceController.Phase.ACTIVE,
             serviceRunning = rt.enabled && !rt.safeMode,
             params = p
         )
@@ -158,7 +164,10 @@ class MicVoiceViewModel @Inject constructor(
     }
 
     fun stop() {
-        viewModelScope.launch { playback.setRealMic() }
+        viewModelScope.launch {
+            playback.setRealMic()
+            micVoice.close()
+        }
     }
 }
 

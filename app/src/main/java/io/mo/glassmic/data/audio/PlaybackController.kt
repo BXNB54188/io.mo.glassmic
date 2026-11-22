@@ -369,12 +369,25 @@ class PlaybackController @Inject constructor(
     suspend fun setMicVoiceSource(): String? = withContext(Dispatchers.IO) {
         if (!runtime.value.enabled) return@withContext AppLocale.string(context, R.string.live_need_service)
         stopPreviewTts()
-        // 不再自己开麦克风：后台采集会被 Android 的并发采集规则喂静音（实测 dumpsys audio 可见）。
-        // 改为 MIC_VOICE —— 由 Hook 让目标 App 自己读真麦，再在它进程里就地变声。
+        // AudioPolicy 注入后端：本进程开麦 → DSP → Publisher → AudioPolicy 注入 Track。
+        // 注入生效后目标 App 的 AudioRecord 由系统从注入 Track 取数据，不再占用真实麦克风，
+        // 因此这里不会被并发采集规则判静音。
+        val src = try {
+            micVoice.open()
+        } catch (error: Exception) {
+            return@withContext error.message ?: error.javaClass.simpleName
+        }
+        if (!runtime.value.enabled) {
+            micVoice.close()
+            return@withContext AppLocale.string(context, R.string.live_need_service)
+        }
         sourceSwitchMutex.withLock {
             publisher.setPaused(false)
-            publisher.setSource(SilenceSource)
-            runtime.setSource(SourceType.MIC_VOICE, groupId = null, audioId = null, durationMs = 0L)
+            publisher.setSource(src)
+        }
+        configStore.update {
+            it.setCurrentGroupId("")
+            it.setCurrentAudioId("")
         }
         configStore.update {
             it.setCurrentGroupId("")
