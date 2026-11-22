@@ -11,6 +11,7 @@ import io.mo.glassmic.audio.FileAudioSource
 import io.mo.glassmic.audio.Pcm16Converter
 import io.mo.glassmic.audio.SharedPcmPublisher
 import io.mo.glassmic.audio.SilenceSource
+import io.mo.glassmic.audio.voice.MicVoiceController
 import io.mo.glassmic.R
 import io.mo.glassmic.audio.tts.PcmSink
 import io.mo.glassmic.audio.tts.TtsProgress
@@ -67,6 +68,7 @@ class PlaybackController @Inject constructor(
     private val ttsFactory: TtsSynthesizerFactory,
     private val ttsProgress: TtsProgress,
     private val liveCapture: LiveCaptureController,
+    private val micVoice: MicVoiceController,
     @ApplicationContext private val context: Context
 ) : MemoryReleasable {
     private val sourceSwitchMutex = Mutex()
@@ -85,6 +87,7 @@ class PlaybackController @Inject constructor(
                     setRealMic()
                 }
                 liveCapture.close()
+                micVoice.close()
             }
         }
     }
@@ -348,6 +351,31 @@ class PlaybackController @Inject constructor(
         // root 授权可能耗时数秒，期间服务若已停止，不再接上这个会话
         if (!runtime.value.enabled) {
             liveCapture.close()
+            return@withContext AppLocale.string(context, R.string.live_need_service)
+        }
+        publisher.setSource(src)
+        publisher.setPaused(false)
+        configStore.update {
+            it.setCurrentGroupId("")
+            it.setCurrentAudioId("")
+        }
+        null
+    }
+
+    /**
+     * 把真实麦克风做实时变声后当作虚拟麦克风音源。失败返回错误信息，成功返回 null。
+     * 采集与 DSP 都在本进程完成，不经过 root 子进程，也不需要网络。
+     */
+    suspend fun setMicVoiceSource(): String? = withContext(Dispatchers.IO) {
+        if (!runtime.value.enabled) return@withContext AppLocale.string(context, R.string.live_need_service)
+        stopPreviewTts()
+        val src = try {
+            micVoice.open()
+        } catch (error: Exception) {
+            return@withContext error.message ?: error.javaClass.simpleName
+        }
+        if (!runtime.value.enabled) {
+            micVoice.close()
             return@withContext AppLocale.string(context, R.string.live_need_service)
         }
         publisher.setSource(src)

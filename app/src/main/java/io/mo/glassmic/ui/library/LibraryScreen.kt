@@ -169,6 +169,10 @@ fun LibraryScreen(vm: LibraryViewModel = hiltViewModel()) {
             }
 
             item {
+                MicVoiceCard(onNotice = { toast.showSnackbar(it) })
+            }
+
+            item {
                 GroupChipsRow(
                     groups = state.groups,
                     selectedId = state.selectedGroupId,
