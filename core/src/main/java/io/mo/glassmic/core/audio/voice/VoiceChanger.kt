@@ -16,7 +16,10 @@ data class VoicePreset(
     val highpassHz: Float = 0f,
     val lowpassHz: Float = 0f,
     val gateDb: Float = -90f,
-    val gain: Float = 1f
+    val gain: Float = 1f,
+    val tremoloHz: Float = 0f,
+    val tremoloDepth: Float = 0f,
+    val drive: Float = 1f
 )
 
 /**
@@ -55,6 +58,18 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     var gain: Float = 1f
         set(value) { field = value.coerceIn(0f, 4f) }
 
+    /** 颤音频率 Hz，0 = 关。 */
+    var tremoloHz: Float = 0f
+        set(value) { field = if (value <= 0.1f) 0f else value.coerceIn(0.5f, 20f) }
+
+    /** 颤音深度 0..1。 */
+    var tremoloDepth: Float = 0f
+        set(value) { field = value.coerceIn(0f, 1f) }
+
+    /** 失真驱动 1 = 关。 */
+    var drive: Float = 1f
+        set(value) { field = value.coerceIn(1f, 8f) }
+
     private val rate: Float = sampleRate.coerceIn(8_000, 192_000).toFloat()
     private val nrRate: Int = sampleRate.coerceIn(8_000, 192_000)
 
@@ -76,6 +91,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
     private var gateOpen = false
 
     private var ringPhase = 0.0
+    private var tremPhase = 0.0
 
     /** 变调内核：MicBoost Tone$Grain 的移植版（50ms 三角窗 + 零权重换向）。 */
     private val grain = GrainShift(sampleRate)
@@ -103,7 +119,9 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         val useGate = gateDb > -89f
         val gainNow = gain
 
-        if (!useGrain && !useRing && !useHp && !useLp && !useGate && abs(gainNow - 1f) <= 0.01f) {
+        if (!useGrain && !useRing && !useHp && !useLp && !useGate && !useTrem && !useDrive &&
+            abs(gainNow - 1f) <= 0.01f
+        ) {
             return false
         }
 
@@ -116,6 +134,9 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             lpK = 1f - exp(-2f * PI.toFloat() * lowpassHz / rate)
         }
         val ringStep = if (useRing) 2.0 * PI * robotHz / rate else 0.0
+        val useTrem = tremoloHz > 0f && tremoloDepth > 0f
+        val tremStep = if (useTrem) 2.0 * PI * tremoloHz / rate else 0.0
+        val useDrive = drive > 1.01f
         val gateLin = 10f.pow(gateDb / 20f)
 
         val end = offset + usable
@@ -145,6 +166,20 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             if (useLp) {
                 lpY1 += lpK * (s - lpY1)
                 s = lpY1
+            }
+
+            if (useDrive) {
+                // 逐采样软饱和：不会引入任何时间轴行为
+                val x = s * drive
+                s = x / (1f + kotlin.math.abs(x))
+                s *= 1.6f   // 补偿 tanh 型曲线的电平损失
+            }
+
+            if (useTrem) {
+                val lfo = 0.5 - 0.5 * cos(tremPhase)          // 0..1
+                s *= (1f - tremoloDepth * lfo)
+                tremPhase += tremStep
+                if (tremPhase >= 2.0 * PI) tremPhase -= 2.0 * PI
             }
 
             if (useGate) {
@@ -198,6 +233,7 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         gateEnv = 0f; gateOpen = false
         dcX = 0f; dcY = 0f
         ringPhase = 0.0
+        tremPhase = 0.0
         grainRing.fill(0f); grainWrite = 0; grainPhase = 0.0
         grain.reset()
     }
@@ -216,27 +252,40 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
         private const val SOFT_RATIO = 8f
 
         const val DEFAULT_SAMPLE_RATE = 48_000
-        const val PARAM_FALLBACK = "off|0|0|0|0|-90|1.0"
+        const val PARAM_FALLBACK = "off|0|0|0|0|-90|1.0|0.0|0.0|1.0"
 
+        /**
+         * 预设全部不使用变调（pitch 一律为 0）。
+         *
+         * 原因：时间拉伸类变调（颗粒/WSOLA）在部分 App 的大块读取录音管线上会产生
+         * 断断续续的听感（上游 issue #25 同类问题）。而环形调制、滤波、失真、颤音
+         * 都是逐采样无状态运算，实测干净、零风险。
+         */
         val PRESETS: List<VoicePreset> = listOf(
             VoicePreset("off", "原声", 0f),
-            VoicePreset("child", "童声", 7f, highpassHz = 120f, gain = 1.05f),
-            VoicePreset("chipmunk", "花栗鼠", 12f, highpassHz = 200f),
-            VoicePreset("deep", "低沉大叔", -6f, lowpassHz = 4500f, gain = 1.1f),
-            VoicePreset("monster", "怪兽", -12f, lowpassHz = 3200f, gain = 1.2f),
             VoicePreset("robot", "机器人", 0f, robotHz = 55f, lowpassHz = 6000f),
-            VoicePreset("alien", "外星人", 5f, robotHz = 120f, highpassHz = 300f),
-            VoicePreset("phone", "电话音", 0f, highpassHz = 400f, lowpassHz = 3400f, gain = 1.3f)
+            VoicePreset("minion", "小黄人", 0f, robotHz = 95f, highpassHz = 300f, lowpassHz = 5200f),
+            VoicePreset("alien", "外星人", 0f, robotHz = 140f, highpassHz = 500f, drive = 1.6f),
+            VoicePreset("phone", "电话音", 0f, highpassHz = 400f, lowpassHz = 3400f, gain = 1.3f),
+            VoicePreset("radio", "老收音机", 0f, highpassHz = 620f, lowpassHz = 2600f, drive = 1.9f, gain = 1.15f),
+            VoicePreset("deep", "低沉", 0f, lowpassHz = 2200f, gain = 1.15f),
+            VoicePreset("husky", "沙哑", 0f, drive = 2.4f, lowpassHz = 5000f),
+            VoicePreset("tremble", "颤抖", 0f, tremoloHz = 6f, tremoloDepth = 0.6f),
+            VoicePreset("cyber", "电子音", 0f, robotHz = 30f, tremoloHz = 4f, tremoloDepth = 0.4f),
+            VoicePreset("pitch_up", "变调·童声(实验)", 7f, highpassHz = 120f),
+            VoicePreset("pitch_down", "变调·低沉(实验)", -6f, lowpassHz = 4500f)
         )
 
         fun presetById(id: String): VoicePreset? = PRESETS.firstOrNull { it.id == id }
 
         /** 编码成 `id|pitch|robot|hp|lp|gate|gain`，跨进程只传这一条字符串。 */
         fun encode(id: String, p: VoicePreset): String =
-            "$id|${p.pitchSemitones}|${p.robotHz}|${p.highpassHz}|${p.lowpassHz}|${p.gateDb}|${p.gain}"
+            "$id|${p.pitchSemitones}|${p.robotHz}|${p.highpassHz}|${p.lowpassHz}|${p.gateDb}|${p.gain}" +
+                "|${p.tremoloHz}|${p.tremoloDepth}|${p.drive}"
 
         fun encodeCurrent(id: String, c: VoiceChanger): String =
-            "$id|${c.pitchSemitones}|${c.robotHz}|${c.highpassHz}|${c.lowpassHz}|${c.gateDb}|${c.gain}"
+            "$id|${c.pitchSemitones}|${c.robotHz}|${c.highpassHz}|${c.lowpassHz}|${c.gateDb}|${c.gain}" +
+                "|${c.tremoloHz}|${c.tremoloDepth}|${c.drive}"
 
         /** 解析并应用；签名没变就直接返回 false，不打断 DSP 状态。 */
         fun applyEncoded(target: VoiceChanger, encoded: String): Boolean {
@@ -253,6 +302,9 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
             target.lowpassHz = f[4].toFloatOrNull() ?: 0f
             target.gateDb = f[5].toFloatOrNull() ?: -90f
             target.gain = f[6].toFloatOrNull() ?: 1f
+            target.tremoloHz = if (f.size > 7) f[7].toFloatOrNull() ?: 0f else 0f
+            target.tremoloDepth = if (f.size > 8) f[8].toFloatOrNull() ?: 0f else 0f
+            target.drive = if (f.size > 9) f[9].toFloatOrNull() ?: 1f else 1f
             target.signature = raw
             return true
         }

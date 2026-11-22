@@ -50,7 +50,7 @@ import javax.inject.Inject
 private const val PREFS_MIC_VOICE = "mic_voice"
 private const val KEY_VOICE_PARAMS = "voice_params"
 
-/** 参数串：id|pitch|robot|hp|lp|gate|gain */
+/** 参数串：id|pitch|robot|hp|lp|gate|gain|tremHz|tremDepth|drive */
 data class VoiceParams(
     val id: String = "off",
     val pitch: Float = 0f,
@@ -58,9 +58,13 @@ data class VoiceParams(
     val highpass: Float = 0f,
     val lowpass: Float = 0f,
     val gate: Float = -90f,
-    val gain: Float = 1f
+    val gain: Float = 1f,
+    val tremolo: Float = 0f,
+    val tremoloDepth: Float = 0f,
+    val drive: Float = 1f
 ) {
-    fun encode(): String = "$id|$pitch|$robot|$highpass|$lowpass|$gate|$gain"
+    fun encode(): String =
+        "$id|$pitch|$robot|$highpass|$lowpass|$gate|$gain|$tremolo|$tremoloDepth|$drive"
 
     companion object {
         fun decode(raw: String?): VoiceParams {
@@ -73,7 +77,10 @@ data class VoiceParams(
                 highpass = f[3].toFloatOrNull() ?: 0f,
                 lowpass = f[4].toFloatOrNull() ?: 0f,
                 gate = f[5].toFloatOrNull() ?: -90f,
-                gain = f[6].toFloatOrNull() ?: 1f
+                gain = f[6].toFloatOrNull() ?: 1f,
+                tremolo = if (f.size > 7) f[7].toFloatOrNull() ?: 0f else 0f,
+                tremoloDepth = if (f.size > 8) f[8].toFloatOrNull() ?: 0f else 0f,
+                drive = if (f.size > 9) f[9].toFloatOrNull() ?: 1f else 1f
             )
         }
 
@@ -84,7 +91,10 @@ data class VoiceParams(
             highpass = preset.highpassHz,
             lowpass = preset.lowpassHz,
             gate = preset.gateDb,
-            gain = preset.gain
+            gain = preset.gain,
+            tremolo = preset.tremoloHz,
+            tremoloDepth = preset.tremoloDepth,
+            drive = preset.drive
         )
     }
 }
@@ -136,6 +146,9 @@ class MicVoiceViewModel @Inject constructor(
     fun setLowpass(v: Float) = save(params.value.copy(id = "custom", lowpass = v))
     fun setGate(v: Float) = save(params.value.copy(id = "custom", gate = v))
     fun setGain(v: Float) = save(params.value.copy(id = "custom", gain = v))
+    fun setTremolo(v: Float) = save(params.value.copy(id = "custom", tremolo = v))
+    fun setTremoloDepth(v: Float) = save(params.value.copy(id = "custom", tremoloDepth = v))
+    fun setDrive(v: Float) = save(params.value.copy(id = "custom", drive = v))
 
     fun start() {
         viewModelScope.launch { playback.setMicVoiceSource() }
@@ -233,14 +246,17 @@ fun MicVoiceCard(
         )
 
         if (advanced) {
-            ParamSlider("音高 (半音)", p.pitch, -12f..12f, String.format("%.0f", p.pitch)) { vm.setPitch(it) }
             ParamSlider("机器人 (Hz)", p.robot, 0f..200f, String.format("%.0f", p.robot)) { vm.setRobot(it) }
+            ParamSlider("颤音 (Hz)", p.tremolo, 0f..12f, String.format("%.1f", p.tremolo)) { vm.setTremolo(it) }
+            ParamSlider("颤音深度", p.tremoloDepth, 0f..1f, String.format("%.2f", p.tremoloDepth)) { vm.setTremoloDepth(it) }
+            ParamSlider("失真", p.drive, 1f..6f, String.format("%.2f", p.drive)) { vm.setDrive(it) }
             ParamSlider("高通 (Hz)", p.highpass, 0f..2000f, String.format("%.0f", p.highpass)) { vm.setHighpass(it) }
             ParamSlider("低通 (Hz)", p.lowpass, 0f..12000f, String.format("%.0f", p.lowpass)) { vm.setLowpass(it) }
             ParamSlider("噪声门 (dB)", p.gate, -90f..-20f, String.format("%.0f", p.gate)) { vm.setGate(it) }
             ParamSlider("增益", p.gain, 0.2f..2.5f, String.format("%.2f", p.gain)) { vm.setGain(it) }
+            ParamSlider("音高（实验·可能卡顿）", p.pitch, -12f..12f, String.format("%.0f", p.pitch)) { vm.setPitch(it) }
             Text(
-                "0 = 关闭该级。音高与机器人同时生效。",
+                "0 = 关闭该级。音高为时间拉伸类算法，部分 App 上会断断续续，默认预设均不使用。",
                 fontSize = 11.sp, color = t.ink3,
                 modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
             )
