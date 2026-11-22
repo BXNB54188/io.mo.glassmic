@@ -42,6 +42,8 @@ object AudioRecordHook {
         var slowReads: Long = 0L
         var lastReadAt: Long = 0L
         var maxGapMs: Long = 0L
+        var reqBytes: Long = 0L
+        var shortReads: Long = 0L
     }
 
     private val voiceStats = WeakHashMap<AudioRecord, VoiceStats>()
@@ -69,6 +71,8 @@ object AudioRecordHook {
             if (gap > st.maxGapMs) st.maxGapMs = gap
         }
         st.lastReadAt = now
+        st.reqBytes += size.toLong()
+        if (n < size) st.shortReads++
 
         if (n > 0 && n <= size &&
             record.audioFormat == AudioFormat.ENCODING_PCM_16BIT &&
@@ -104,13 +108,15 @@ object AudioRecordHook {
             val reads = if (st.reads > 0L) st.reads else 1L
             Log.i(
                 "GlassMic-MicVoice",
-                "reads=${st.reads} bytes=${st.bytes} avgDspUs=${st.dspNanos / 1000 / reads} " +
+                "reads=${st.reads} bytes=${st.bytes} req=${st.reqBytes} short=${st.shortReads} " +
+                    "avgDspUs=${st.dspNanos / 1000 / reads} " +
                     "maxDspUs=${st.maxDspNanos / 1000} maxGapMs=${st.maxGapMs} " +
                     "rate=${record.sampleRate} ch=${record.channelCount} " +
                     "fmt=${record.audioFormat} params=${st.paramsEncoded}"
             )
             st.logAt = now
-            st.reads = 0L; st.bytes = 0L; st.dspNanos = 0L; st.maxDspNanos = 0L; st.maxGapMs = 0L
+            st.reads = 0L; st.bytes = 0L; st.reqBytes = 0L; st.shortReads = 0L
+            st.dspNanos = 0L; st.maxDspNanos = 0L; st.maxGapMs = 0L
         }
         return HookDecision.Replace(n)
     }

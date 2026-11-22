@@ -199,8 +199,11 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
 
     companion object {
         private const val GRAINS = 4
-        private const val GRAIN_W = 2048
-        private const val GRAIN_RING = 8192
+        // 窗口 4096（93ms @44.1k）：读头的相位环绕周期 = W/(1-ratio)，
+        // 对 -12 半音(ratio 0.5) 从 93ms 拉长到 186ms，跳变次数减半，
+        // 听感从"每秒碎 10 次"变成"缓慢起伏"。
+        private const val GRAIN_W = 4096
+        private const val GRAIN_RING = 16384
         private const val GRAIN_NORM = 2f   // 4 个 Hann 窗之和恒为 2
         private const val SOFT_KNEE = 0.9f
         private const val SOFT_RATIO = 8f
