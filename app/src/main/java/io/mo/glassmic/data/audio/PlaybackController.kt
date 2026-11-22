@@ -72,6 +72,7 @@ class PlaybackController @Inject constructor(
     @ApplicationContext private val context: Context
 ) : MemoryReleasable {
     private val sourceSwitchMutex = Mutex()
+    private var micWatch: Job? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -390,6 +391,16 @@ class PlaybackController @Inject constructor(
         sourceSwitchMutex.withLock {
             publisher.setPaused(false)
             publisher.setSource(src)
+        }
+        // 按需采集：只有目标 App 真的在录音（Publisher 有 consumer）时才打开麦克风。
+        // 没人录的时候完全不占设备，也不和别的录音应用抢麦。
+        micWatch?.cancel()
+        micWatch = scope.launch {
+            while (isActive && runtime.value.currentSourceType != SourceType.REAL_MIC) {
+                micVoice.setConsumerActive(publisher.consumerCount > 0)
+                delay(200)
+            }
+            micVoice.setConsumerActive(false)
         }
         configStore.update {
             it.setCurrentGroupId("")

@@ -44,6 +44,21 @@ class MicVoiceController @Inject constructor(
     @Volatile private var thread: Thread? = null
     @Volatile private var running = false
 
+    /**
+     * 是否有目标 App 正在录音（Publisher 有 consumer）。
+     *
+     * 没有消费者时完全不打开麦克风：省电、不占设备、也不会和其它录音应用抢麦。
+     * 由 PlaybackController 根据 publisher.consumerCount 驱动。
+     */
+    @Volatile private var consumerActive = false
+
+    fun setConsumerActive(active: Boolean) {
+        if (consumerActive != active) {
+            consumerActive = active
+            GlassLog.b("MicVoice") { if (active) "检测到录音客户端，开始采集" else "无客户端录音，挂起采集" }
+        }
+    }
+
     private val prefs by lazy { context.getSharedPreferences("mic_voice", Context.MODE_PRIVATE) }
 
     fun open(): LiveCaptureSource {
@@ -82,25 +97,38 @@ class MicVoiceController @Inject constructor(
         var peakLogAt = 0L
         var CAPTURE_SOURCE = -1
         try {
-            val rec = openRecord()
-            if (rec == null) {
-                fail("麦克风不可用（检查录音权限或是否被其他应用占用）")
-                return
-            }
-            record = rec
-            CAPTURE_SOURCE = rec.audioSource
-            rec.startRecording()
-            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                fail("麦克风启动失败")
-                return
-            }
             while (running) {
+                // 没人录音就彻底不占麦克风
+                if (!consumerActive) {
+                    if (record != null) {
+                        runCatching { record?.stop() }
+                        runCatching { record?.release() }
+                        record = null
+                    }
+                    Thread.sleep(100)
+                    continue
+                }
+                if (record == null) {
+                    val rec = openRecord()
+                    if (rec == null) {
+                        fail("麦克风不可用（检查录音权限或是否被其他应用占用）")
+                        return
+                    }
+                    record = rec
+                    CAPTURE_SOURCE = rec.audioSource
+                    rec.startRecording()
+                    if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        fail("麦克风启动失败")
+                        return
+                    }
+                }
                 val now = android.os.SystemClock.uptimeMillis()
                 if (now - lastParamsAt >= 300L) {
                     lastParamsAt = now
                     val encoded = prefs.getString("voice_params", null)
                     if (encoded != null) VoiceChanger.applyEncoded(changer, encoded)
                 }
+                val rec = record ?: continue
                 val n = rec.read(buf, 0, buf.size)
                 if (n < 0) {
                     fail("麦克风读取错误 $n")
