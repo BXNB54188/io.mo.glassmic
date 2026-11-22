@@ -173,8 +173,9 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
 
     fun process(buf: ByteArray, length: Int): Boolean = process(buf, 0, length)
 
-    /** 诊断：WSOLA 已生成帧数与累计耗时（纳秒）。 */
-    fun pitchEngineStats(): Pair<Long, Long> = wsola.frames to wsola.frameNanos
+    /** 诊断：[已生成帧数, 累计耗时纳秒, 饥饿采样数(累计)] */
+    fun pitchEngineStats(): LongArray =
+        longArrayOf(wsola.frames, wsola.frameNanos, wsola.starved)
 
     private fun tap(delay: Double): Float {
         var pos = grainWrite - delay

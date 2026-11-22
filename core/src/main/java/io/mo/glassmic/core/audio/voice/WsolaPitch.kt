@@ -29,6 +29,8 @@ internal class WsolaPitch {
     private var olaWrite = 0L
     private var outRead = 0L
 
+    /** 重采样读出位置（小数，单位是 OLA 输出样本）。 */
+    private var outPos = 0.0
     private var pos = 0.0
     private var prevStart = -1L
     private var primed = false
@@ -37,6 +39,10 @@ internal class WsolaPitch {
     var frames: Long = 0L
         private set
     var frameNanos: Long = 0L
+        private set
+
+    /** 诊断：因输入不足而输出静音的采样数（正常应为 0）。 */
+    var starved: Long = 0L
         private set
 
     private val win = FloatArray(W) { i ->
@@ -48,24 +54,38 @@ internal class WsolaPitch {
         inWrite++
         inCount++
 
-        if (inCount < LOOKAHEAD) return 0f
-
         if (!primed) {
+            if (inCount < LOOKAHEAD) return 0f
             primed = true
             pos = 0.0
             prevStart = -1L
             olaWrite = 0L
-            outRead = 0L
+            outPos = 0.0
             ola.fill(0f)
         }
 
+        // 保证 OLA 里领先读出位置至少一个合成步长，避免读到还没被后续帧补全的样本
         var guard = 0
-        while (outRead >= olaWrite && guard++ < 8) {
-            if (!produceFrame()) return 0f
+        while (olaWrite - outPos < HS && guard++ < 4) {
+            if (!produceFrame()) break
         }
-        if (outRead >= olaWrite) return 0f
+        if (olaWrite - outPos < 1.0) {
+            starved++
+            return 0f
+        }
 
-        return ola[(outRead++ % OUT_SIZE).toInt()]
+        val v = readOla(outPos)
+        outPos += ratio
+        return v
+    }
+
+    /** 线性插值读 OLA 环。 */
+    private fun readOla(p: Double): Float {
+        val i0 = kotlin.math.floor(p).toLong()
+        val frac = (p - i0).toFloat()
+        val a = ola[(i0 % OUT_SIZE).toInt()]
+        val b = ola[((i0 + 1) % OUT_SIZE).toInt()]
+        return a + (b - a) * frac
     }
 
     private fun produceFrame(): Boolean {
@@ -91,7 +111,9 @@ internal class WsolaPitch {
 
         prevStart = fs.toLong()
         olaWrite = base + HS
-        pos += HS.toDouble() * ratio
+        // 时间伸缩因子 α = ratio => 分析步长 = HS/α = HS/ratio
+        // 之后的重采样再以 ratio 的速率读出，净输入消费才等于 1 样本/输出样本。
+        pos += HS.toDouble() / ratio.coerceAtLeast(0.01f).toDouble()
 
         frames++
         frameNanos += System.nanoTime() - t0
@@ -125,7 +147,7 @@ internal class WsolaPitch {
     fun reset() {
         inRing.fill(0f); inWrite = 0; inCount = 0
         ola.fill(0f); olaWrite = 0; outRead = 0
-        pos = 0.0; prevStart = -1; primed = false
+        outPos = 0.0; pos = 0.0; prevStart = -1; primed = false; starved = 0
         frames = 0; frameNanos = 0
     }
 

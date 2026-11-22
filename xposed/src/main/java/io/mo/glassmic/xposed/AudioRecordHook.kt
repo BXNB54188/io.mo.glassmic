@@ -44,6 +44,8 @@ object AudioRecordHook {
         var maxGapMs: Long = 0L
         var reqBytes: Long = 0L
         var shortReads: Long = 0L
+        var wsFrames: Long = 0L
+        var wsStarved: Long = 0L
     }
 
     private val voiceStats = WeakHashMap<AudioRecord, VoiceStats>()
@@ -96,6 +98,9 @@ object AudioRecordHook {
                 val t0 = System.nanoTime()
                 changer.process(buf, offset, n)
                 val dt = System.nanoTime() - t0
+                val eng = changer.pitchEngineStats()
+                st.wsFrames += eng[0]
+                st.wsStarved = eng[2]
                 st.reads++
                 st.bytes += n.toLong()
                 st.dspNanos += dt
@@ -111,11 +116,12 @@ object AudioRecordHook {
                 "reads=${st.reads} bytes=${st.bytes} req=${st.reqBytes} short=${st.shortReads} " +
                     "avgDspUs=${st.dspNanos / 1000 / reads} " +
                     "maxDspUs=${st.maxDspNanos / 1000} maxGapMs=${st.maxGapMs} " +
+                    "wsFrames=${st.wsFrames} wsStarved=${st.wsStarved} " +
                     "rate=${record.sampleRate} ch=${record.channelCount} " +
                     "fmt=${record.audioFormat} params=${st.paramsEncoded}"
             )
             st.logAt = now
-            st.reads = 0L; st.bytes = 0L; st.reqBytes = 0L; st.shortReads = 0L
+            st.reads = 0L; st.bytes = 0L; st.reqBytes = 0L; st.shortReads = 0L; st.wsFrames = 0L
             st.dspNanos = 0L; st.maxDspNanos = 0L; st.maxGapMs = 0L
         }
         return HookDecision.Replace(n)
