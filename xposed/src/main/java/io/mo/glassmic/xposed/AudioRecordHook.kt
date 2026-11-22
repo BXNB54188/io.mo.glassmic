@@ -118,7 +118,7 @@ object AudioRecordHook {
         if (now - st.logAt >= 2000L) {
             val reads = if (st.reads > 0L) st.reads else 1L
             Log.i(
-                "GlassMic-MicVoice",
+                "GMCAP",
                 "reads=${st.reads} bytes=${st.bytes} req=${st.reqBytes} short=${st.shortReads} " +
                     "avgDspUs=${st.dspNanos / 1000 / reads} " +
                     "maxDspUs=${st.maxDspNanos / 1000} maxGapMs=${st.maxGapMs} " +
@@ -384,10 +384,13 @@ object AudioRecordHook {
 
     private fun markHit(appCtx: Context, pkg: String, record: AudioRecord) {
         if (voiceEverHit.compareAndSet(false, true)) {
-            Log.i(
-                "GlassMic-MicVoice",
-                "MIC_VOICE 分支首次命中 BUILD=$VOICE_BUILD pkg=$pkg rate=${record.sampleRate} " +
-                    "ch=${record.channelCount} fmt=${record.audioFormat} api=${XBridge.apiVersion}"
+            val detail = "BUILD=$VOICE_BUILD rate=${record.sampleRate} " +
+                "ch=${record.channelCount} fmt=${record.audioFormat} api=${XBridge.apiVersion}"
+            Log.i("GMCAP", "MIC_VOICE 首次命中 pkg=$pkg $detail")
+            // 同时写进 App 诊断页：不依赖 logcat 缓冲区，随时能查
+            XBridge.reportDiagnosticEvent(
+                appCtx, pkg, "mic_voice_first_hit",
+                android.os.Bundle().apply { putString("detail", detail) }
             )
         }
     }
