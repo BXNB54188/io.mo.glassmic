@@ -173,6 +173,11 @@ class VoiceChanger(val sampleRate: Int = 48_000) {
 
     fun process(buf: ByteArray, length: Int): Boolean = process(buf, 0, length)
 
+    /** 用编码串更新参数（签名未变时不做任何事）。 */
+    fun applyParams(encoded: String) {
+        applyEncoded(this, encoded)
+    }
+
     /** 诊断：[已生成帧数, 累计耗时纳秒, 饥饿采样数(累计)] */
     fun pitchEngineStats(): LongArray =
         longArrayOf(wsola.frames, wsola.frameNanos, wsola.starved)

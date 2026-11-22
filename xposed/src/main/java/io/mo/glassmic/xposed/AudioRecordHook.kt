@@ -50,6 +50,9 @@ object AudioRecordHook {
 
     private val voiceStats = WeakHashMap<AudioRecord, VoiceStats>()
 
+    /** 首次命中 MIC_VOICE 时打一条日志：用来确认 hook 到底跑没跑。 */
+    private val voiceEverHit = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /**
      * MIC_VOICE：先让目标 App 自己从真麦克风读（它在前台，不会被并发采集规则静音），
      * 再把读到的那块 PCM 就地变声后还给目标 App。
@@ -216,6 +219,26 @@ object AudioRecordHook {
         if (!validRange(buf.size, offset, sizeInShorts)) return HookDecision.Proceed
 
         val record = chain.thisObject as AudioRecord
+        if (src == SourceType.MIC_VOICE) {
+            val raw = chain.proceed()
+            if (raw == null) return HookDecision.Proceed
+            val n = raw as? Int ?: return HookDecision.Replace(raw)
+            if (n > 0 && n <= sizeInShorts && record.channelCount == 1) {
+                runCatching {
+                    val bytes = ByteArray(n * 2)
+                    val bb = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (k in 0 until n) bb.putShort(buf[offset + k])
+                    val c = changerOf(record)
+                    markHit(appCtx, pkg, record)
+                    c.applyParams(XBridge.resolveVoicePreset(appCtx, pkg))
+                    c.process(bytes, 0, bytes.size)
+                    val rb = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (k in 0 until n) buf[offset + k] = rb.short
+                }
+            }
+            accumulate(appCtx, pkg, sizeInShorts * 2, record.sampleRate, record.channelCount)
+            return HookDecision.Replace(n)
+        }
         if (src == SourceType.SILENCE) {
             ComfortNoise.fillShorts(buf, offset, sizeInShorts)
             paceSilence(sizeInShorts / record.channelCount.coerceAtLeast(1), record.sampleRate)
@@ -247,6 +270,29 @@ object AudioRecordHook {
         if (!validRange(buf.size, offset, sizeInFloats)) return HookDecision.Proceed
 
         val record = chain.thisObject as AudioRecord
+        if (src == SourceType.MIC_VOICE) {
+            val raw = chain.proceed()
+            if (raw == null) return HookDecision.Proceed
+            val n = raw as? Int ?: return HookDecision.Replace(raw)
+            if (n > 0 && n <= sizeInFloats && record.channelCount == 1) {
+                runCatching {
+                    val bytes = ByteArray(n * 2)
+                    val bb = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (k in 0 until n) {
+                        val v = (buf[offset + k] * 32767f).toInt().coerceIn(-32768, 32767)
+                        bb.putShort(v.toShort())
+                    }
+                    val c = changerOf(record)
+                    markHit(appCtx, pkg, record)
+                    c.applyParams(XBridge.resolveVoicePreset(appCtx, pkg))
+                    c.process(bytes, 0, bytes.size)
+                    val rb = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (k in 0 until n) buf[offset + k] = rb.short / 32768f
+                }
+            }
+            accumulate(appCtx, pkg, sizeInFloats * 4, record.sampleRate, record.channelCount)
+            return HookDecision.Replace(n)
+        }
         if (src == SourceType.SILENCE) {
             ComfortNoise.fillFloats(buf, offset, sizeInFloats)
             paceSilence(sizeInFloats / record.channelCount.coerceAtLeast(1), record.sampleRate)
@@ -278,6 +324,29 @@ object AudioRecordHook {
 
         val record = chain.thisObject as AudioRecord
         val pos = buf.position()
+        if (src == SourceType.MIC_VOICE) {
+            val raw = chain.proceed()
+            if (raw == null) return HookDecision.Proceed
+            val n = raw as? Int ?: return HookDecision.Replace(raw)
+            if (n > 0 && n <= size &&
+                record.audioFormat == AudioFormat.ENCODING_PCM_16BIT &&
+                record.channelCount == 1
+            ) {
+                runCatching {
+                    val tmp = ByteArray(n)
+                    buf.position(pos)
+                    buf.get(tmp, 0, n)
+                    val c = changerOf(record)
+                    markHit(appCtx, pkg, record)
+                    c.applyParams(XBridge.resolveVoicePreset(appCtx, pkg))
+                    c.process(tmp, 0, n)
+                    buf.position(pos)
+                    buf.put(tmp, 0, n)
+                }
+            }
+            accumulate(appCtx, pkg, size, record.sampleRate, record.channelCount)
+            return HookDecision.Replace(n)
+        }
         if (src == SourceType.SILENCE) {
             val isFloat = record.audioFormat == AudioFormat.ENCODING_PCM_FLOAT
             if (isFloat) ComfortNoise.putFloat32(buf, size)
@@ -305,6 +374,19 @@ object AudioRecordHook {
         buf.position(pos)
         accumulate(appCtx, pkg, size, record.sampleRate, record.channelCount)
         return HookDecision.Replace(size)
+    }
+
+    private fun changerOf(record: AudioRecord): VoiceChanger =
+        synchronized(voiceChangers) { voiceChangers.getOrPut(record) { VoiceChanger(record.sampleRate) } }
+
+    private fun markHit(appCtx: Context, pkg: String, record: AudioRecord) {
+        if (voiceEverHit.compareAndSet(false, true)) {
+            Log.i(
+                "GlassMic-MicVoice",
+                "MIC_VOICE 分支首次命中 pkg=$pkg rate=${record.sampleRate} " +
+                    "ch=${record.channelCount} fmt=${record.audioFormat} api=${XBridge.apiVersion}"
+            )
+        }
     }
 
     private fun handleRelease(appCtx: Context, pkg: String, chain: HookCall): HookDecision {
