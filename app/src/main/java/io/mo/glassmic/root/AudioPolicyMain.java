@@ -160,7 +160,7 @@ public final class AudioPolicyMain {
                 boolean rec = false;
                 try {
                     for (AudioRecordingConfiguration cfg : am.getActiveRecordingConfigurations()) {
-                        int uid = cfg.getClientUid();
+                        int uid = clientUidOf(cfg);
                         for (int u : targetUids) {
                             if (u == uid) { rec = true; break; }
                         }
@@ -212,6 +212,20 @@ public final class AudioPolicyMain {
                     SystemClock.sleep(2);
                 }
             }
+        }
+    }
+
+    /**
+     * getClientUid() 是系统隐藏 API，公开 android.jar 里没有，只能反射。
+     * 本进程启动时已 setHiddenApiExemptions({"L"})，运行时可以调到。
+     */
+    private static int clientUidOf(Object cfg) {
+        try {
+            Method m = cfg.getClass().getMethod("getClientUid");
+            Object v = m.invoke(cfg);
+            return v instanceof Integer ? (Integer) v : -1;
+        } catch (Throwable ignored) {
+            return -1;
         }
     }
 
