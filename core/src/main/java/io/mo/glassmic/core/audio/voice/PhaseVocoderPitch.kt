@@ -107,7 +107,9 @@ internal class PhaseVocoderPitch(private val sampleRate: Int) {
         // ---------- 合成 ----------
         fft(re, im, 1)
 
-        val norm = 2.0 / n2 / osamp
+        // Bernsee 原式：2*window*re/(n2*osamp)。这里把系数拆开写，
+        // 避免和下面的 2.0 重复相乘导致整体增益翻倍（会一路顶到软限幅 → 沙哑）。
+        val norm = 1.0 / n2 / osamp
         for (k in 0 until n) {
             outAccum[k] += (2.0 * window[k] * re[k] * norm).toFloat()
         }

@@ -150,6 +150,9 @@ class MicVoiceViewModel @Inject constructor(
     fun setTremoloDepth(v: Float) = save(params.value.copy(id = "custom", tremoloDepth = v))
     fun setDrive(v: Float) = save(params.value.copy(id = "custom", drive = v))
 
+    /** 一键回到中性：所有效果关闭、音高 0、增益 1。 */
+    fun resetNeutral() = save(VoiceParams(id = "neutral"))
+
     fun start() {
         viewModelScope.launch { playback.setMicVoiceSource() }
     }
@@ -165,6 +168,7 @@ private fun ParamSlider(
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     display: String,
+    steps: Int = 0,
     onChange: (Float) -> Unit
 ) {
     val t = glass
@@ -177,6 +181,7 @@ private fun ParamSlider(
             value = value,
             onValueChange = onChange,
             valueRange = range,
+            steps = steps,
             modifier = Modifier.fillMaxWidth().height(30.dp)
         )
     }
@@ -253,10 +258,18 @@ fun MicVoiceCard(
             ParamSlider("高通 (Hz)", p.highpass, 0f..2000f, String.format("%.0f", p.highpass)) { vm.setHighpass(it) }
             ParamSlider("低通 (Hz)", p.lowpass, 0f..12000f, String.format("%.0f", p.lowpass)) { vm.setLowpass(it) }
             ParamSlider("噪声门 (dB)", p.gate, -90f..-20f, String.format("%.0f", p.gate)) { vm.setGate(it) }
-            ParamSlider("增益", p.gain, 0.2f..2.5f, String.format("%.2f", p.gain)) { vm.setGain(it) }
-            ParamSlider("音高（实验·可能卡顿）", p.pitch, -12f..12f, String.format("%.0f", p.pitch)) { vm.setPitch(it) }
+            ParamSlider("增益（1.00 = 不变）", p.gain, 0.5f..2.5f, String.format("%.2f", p.gain)) { vm.setGain(it) }
+            ParamSlider("音高 半音（0 = 不变）", p.pitch, -12f..12f, String.format("%.0f", p.pitch), steps = 23) { vm.setPitch(it) }
             Text(
-                "0 = 关闭该级。音高为时间拉伸类算法，部分 App 上会断断续续，默认预设均不使用。",
+                "重置为中性",
+                fontSize = 13.sp, color = t.primaryInk,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { vm.resetNeutral() }
+                    .padding(top = 6.dp, bottom = 2.dp)
+            )
+            Text(
+                "0 = 关闭该级；音高 0 = 不变；增益 1.00 = 不变；失真 1.00 = 关闭。",
                 fontSize = 11.sp, color = t.ink3,
                 modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
             )
