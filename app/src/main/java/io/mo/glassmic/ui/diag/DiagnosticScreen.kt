@@ -547,6 +547,7 @@ private fun DecisionItemRow(record: DecisionRecord) {
         SourceType.FILE, SourceType.TTS, SourceType.LIVE -> t.ok
         SourceType.SILENCE -> t.primaryInk
         SourceType.REAL_MIC -> t.ink3
+        SourceType.MIC_VOICE -> t.ok
     }
 
     Row(

@@ -110,6 +110,7 @@ class HomeViewModel @Inject constructor(
                 SourceType.TTS -> AppLocale.string(context, R.string.source_tts)
                 SourceType.LIVE -> AppLocale.string(context, R.string.source_live,
                     context.appLabelOf(liveCapture.status.value.packageName))
+                SourceType.MIC_VOICE -> "麦克风变声"
             },
             groupName = group?.let { "${it.emoji} ${it.name}" } ?: "—",
             sourceEmoji = when (rt.currentSourceType) {
@@ -118,6 +119,7 @@ class HomeViewModel @Inject constructor(
                 SourceType.SILENCE -> "🔇"
                 SourceType.REAL_MIC -> "🎙️"
                 SourceType.LIVE -> "📡"
+                SourceType.MIC_VOICE -> "🎭"
             },
             groupPlainName = when (rt.currentSourceType) {
                 SourceType.FILE -> group?.name.orEmpty()
